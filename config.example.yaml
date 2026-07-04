@@ -1,0 +1,20 @@
+# DeepSeek 示例配置。复制为 config.yaml 后使用。
+protocol: deepseek
+model: deepseek-v4-pro
+base_url: https://api.deepseek.com
+api_key: ${DEEPSEEK_API_KEY}
+
+# OpenAI 示例：
+# protocol: openai
+# model: gpt-4.1
+# base_url: https://api.openai.com/v1
+# api_key: ${OPENAI_API_KEY}
+
+# Anthropic 示例：
+# protocol: anthropic
+# model: claude-sonnet-4-5
+# base_url: https://api.anthropic.com
+# api_key: ${ANTHROPIC_API_KEY}
+# thinking:
+#   enabled: true
+#   budget_tokens: 4096
