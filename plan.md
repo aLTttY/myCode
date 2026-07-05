@@ -1,274 +1,223 @@
-# myCode 工具系统 Plan
+# myCode Agent Loop Plan
 
 ## 架构概览
 
-本阶段在现有 myCode MVP 上增加工具系统，保持现有分层不被打散。核心调用链调整为：
+本阶段在已有工具系统上新增独立 Agent 层，把“多轮循环、停止条件、事件流、工具分批执行、Plan Mode”从 `ChatSession` 和 CLI 中分离出来。
+
+核心调用链调整为：
 
 ```text
 CLI 读取用户输入
-  → ChatSession 发起第一轮 Provider 流式请求
-  → Provider 输出文本增量或工具调用事件
-  → ChatSession 收集至多一组工具调用
-  → ToolExecutor 执行工具并生成结构化结果
-  → ChatSession 把 assistant 工具调用消息和 tool 结果消息追加到历史
-  → ChatSession 发起第二轮 Provider 流式请求
-  → Provider 输出最终文本
-  → 本轮停止，不继续自动执行后续工具调用
+  → 识别普通输入、/plan、/do、取消信号
+  → AgentRunner.run(request)
+  → 输出 AgentEvent 异步事件流
+  → CLI 只消费事件并展示
+
+AgentRunner 每轮：
+  → 发出 iteration_started 进度事件
+  → 调用 Provider.stream_chat(messages, tools)
+  → StreamCollector 双路收集：实时转发 text_delta，同时累计完整响应和 tool calls
+  → 若无工具调用：追加 assistant 回复，发出 done，停止
+  → 若有工具调用：ToolBatcher 按安全性分批
+  → ToolBatchExecutor 并发执行读类批次、串行执行有副作用批次
+  → 工具结果按 tool_call_id 回写历史
+  → 进入下一轮
 ```
 
-### 工具层
+### 分层职责
 
-工具层提供统一 `Tool` 接口、工具元信息、参数 Schema、执行上下文和结构化执行结果。六个核心工具都放在该层：
+- **Provider 层**：继续只负责把供应商流式响应转换为统一 `StreamEvent`，不执行工具、不控制循环。
+- **工具层**：继续提供工具声明、执行和结果结构；新增工具安全分类能力。
+- **Agent 层**：负责 ReAct 循环、停止条件、事件流、工具批处理和 Plan Mode。
+- **CLI 层**：只负责输入命令解析和消费 Agent 事件，不直接操作工具调用细节。
 
-- `read_file`
-- `write_file`
-- `edit_file`
-- `run_command`
-- `find_files`
-- `search_code`
+### 为什么新增 Agent 层
 
-工具只负责“执行本地动作并返回结果”，不依赖具体 Provider，也不直接操作会话历史。
+当前 `ChatSession` 已经承担了一轮工具回灌编排。继续在 `ChatSession` 里堆 Agent Loop 会把会话历史、Provider 流解析、工具执行策略、停止条件和终端展示耦合在一起。新增 Agent 层后：
 
-### 注册中心层
-
-注册中心集中登记工具，提供按名称查找和导出工具声明列表的能力。Provider 不直接依赖具体工具类，只接收注册中心导出的工具声明。
-
-本阶段优先生成 OpenAI-compatible tools 格式。Anthropic 需要的工具声明格式由 Anthropic Provider 在发送请求前做适配，避免工具层绑定单一供应商协议。
-
-### Provider 层
-
-Provider 层从“只输出文本事件”扩展为“输出统一流式事件”，包括：
-
-- 文本增量
-- assistant 消息结束
-- 工具调用参数增量
-- 工具调用结束
-
-OpenAI-compatible Provider 解析 `tool_calls` 流式 delta。Anthropic Provider 解析 `tool_use` 相关流式事件。Provider 只负责把供应商事件转换成统一事件，不负责执行工具。
-
-### 会话编排层
-
-`ChatSession` 成为单轮工具闭环的编排者：
-
-1. 追加用户消息。
-2. 调用 Provider，传入消息历史和工具声明。
-3. 流式输出普通文本事件给 CLI。
-4. 若出现工具调用，拼接参数碎片并执行工具。
-5. 把工具调用和工具结果追加到历史。
-6. 发起一次后续 Provider 请求。
-7. 后续请求只输出文本；即使模型再次请求工具，也返回错误提示或停止，不进入第二轮工具执行。
-
-该设计覆盖 spec 的单轮停止要求，避免提前实现 Agent Loop。
-
-### CLI 层
-
-CLI 仍只负责终端交互、打印流式文本和展示工具执行状态。CLI 不解析工具参数、不查找工具、不执行工具。
-
-当收到工具状态事件时，CLI 打印可观察提示，例如：
-
-```text
-[tool] run_command 开始
-[tool] run_command 成功
-[tool] edit_file 失败：old_text matched 0 times
-```
-
-### 安全边界
-
-工具执行统一通过 `ToolContext` 获取工作区根目录、超时时间和输出大小限制。路径类工具必须先解析并确认目标路径仍在工作区根目录内。命令执行默认在工作区根目录运行。
+- `ChatSession` 可以保留或退化为轻量历史容器。
+- `AgentRunner` 成为可测试的核心执行器。
+- CLI、未来 TUI、测试 fake consumer 都可以只消费事件流。
 
 ## 核心数据结构
 
-### ToolSpec
+### AgentMode
 
-描述一个工具暴露给模型的元信息。
+表示 Agent 运行模式。
+
+```python
+AgentMode = Literal["default", "plan", "do"]
+```
+
+规则：
+
+- `default`: 普通用户输入，使用完整工具集合和 Agent Loop。
+- `plan`: `/plan` 输入，只开放读类工具，输出计划，不允许副作用工具。
+- `do`: `/do` 输入，使用完整工具集合执行任务或已有计划。
+
+### AgentConfig
+
+Agent Loop 运行配置。
 
 ```python
 @dataclass(frozen=True)
-class ToolSpec:
-    name: str
-    description: str
-    parameters: dict[str, object]
+class AgentConfig:
+    max_iterations: int = 8
+    max_unknown_tool_calls: int = 2
 ```
 
 字段说明：
 
-- `name`: 工具唯一名称。
-- `description`: 给模型看的用途说明。
-- `parameters`: JSON Schema 风格参数约束。
+- `max_iterations`: 最大循环轮数，达到后停止。
+- `max_unknown_tool_calls`: 连续未知工具调用上限。
 
-### ToolContext
+### AgentRequest
 
-工具执行上下文。
+一次 Agent 运行请求。
 
 ```python
 @dataclass(frozen=True)
-class ToolContext:
-    workspace_root: Path
-    timeout_seconds: float
-    max_output_chars: int
+class AgentRequest:
+    text: str
+    mode: AgentMode = "default"
 ```
 
 字段说明：
 
-- `workspace_root`: 允许读写和执行命令的根目录。
-- `timeout_seconds`: 工具执行超时时间。
-- `max_output_chars`: 命令输出和搜索结果的最大返回字符数。
+- `text`: 用户输入正文。
+- `mode`: 普通、计划或执行模式。
 
-### ToolResult
+### AgentStopReason
 
-工具执行后的结构化结果。
+结构化停止原因。
+
+```python
+AgentStopReason = Literal[
+    "completed",
+    "max_iterations",
+    "cancelled",
+    "unknown_tools",
+    "stream_error",
+    "tool_parse_error",
+]
+```
+
+### AgentEvent
+
+Agent 对外输出的统一事件。
 
 ```python
 @dataclass(frozen=True)
-class ToolResult:
-    ok: bool
-    message: str
-    data: dict[str, object]
-```
-
-字段说明：
-
-- `ok`: 成功或失败。
-- `message`: 给模型和终端用户看的简短说明。
-- `data`: 结构化数据，例如文件内容、退出码、匹配列表、stdout、stderr。
-
-### ToolCall
-
-表示模型请求的一次工具调用。
-
-```python
-@dataclass(frozen=True)
-class ToolCall:
-    id: str
-    name: str
-    arguments: dict[str, object]
-```
-
-字段说明：
-
-- `id`: Provider 侧工具调用 ID，用于把工具结果关联回对话历史。
-- `name`: 工具名称。
-- `arguments`: 已解析完成的 JSON 参数。
-
-### PendingToolCall
-
-用于流式拼接中的临时工具调用。
-
-```python
-@dataclass
-class PendingToolCall:
-    id: str
-    name: str
-    arguments_json_parts: list[str]
-```
-
-字段说明：
-
-- `arguments_json_parts`: 保存模型流式返回的 JSON 参数碎片。
-
-### StreamEvent
-
-扩展现有 `StreamEvent`，支持工具相关事件。
-
-```python
-@dataclass(frozen=True)
-class StreamEvent:
+class AgentEvent:
     type: Literal[
         "text_delta",
-        "message_done",
-        "tool_call_delta",
-        "tool_call_done",
-        "tool_started",
-        "tool_finished",
+        "tool_call_started",
+        "tool_result",
+        "token_usage",
+        "progress",
+        "done",
+        "error",
     ]
     text: str = ""
+    iteration: int = 0
+    max_iterations: int = 0
     tool_call_id: str = ""
     tool_name: str = ""
-    arguments_delta: str = ""
     tool_result: ToolResult | None = None
+    stop_reason: AgentStopReason | None = None
+    message: str = ""
+    token_usage: TokenUsage | None = None
 ```
 
 约定：
 
-- Provider 只产生 `text_delta`、`message_done`、`tool_call_delta`、`tool_call_done`。
-- `ChatSession` 或 `ToolExecutor` 产生 `tool_started`、`tool_finished`。
-- CLI 只根据事件打印，不执行业务逻辑。
+- CLI 只消费 `AgentEvent`。
+- Provider 原始 `StreamEvent` 不直接暴露给 CLI。
+- `progress` 表示轮次、批次、停止原因等过程状态。
+- `done` 表示 Agent 本次请求已停止。
 
-### Message
+### TokenUsage
 
-扩展现有会话消息以表达工具调用和工具结果。
+Token 用量事件载体。
 
 ```python
 @dataclass(frozen=True)
-class Message:
-    role: Literal["user", "assistant", "tool"]
-    content: str
-    tool_calls: tuple[ToolCall, ...] = ()
-    tool_call_id: str = ""
+class TokenUsage:
+    input_tokens: int | None = None
+    output_tokens: int | None = None
+    total_tokens: int | None = None
 ```
 
-约定：
+规则：
 
-- 普通 user/assistant 消息继续使用 `content`。
-- assistant 请求工具时，`tool_calls` 保存模型请求。
-- tool 消息使用 `tool_call_id` 关联对应工具调用，`content` 保存 `ToolResult` JSON。
+- Provider 能解析到用量时填充字段。
+- Provider 不支持或未返回时允许字段为空。
 
-### Tool 接口
+### CollectedResponse
+
+流式双路收集后的完整模型响应。
 
 ```python
-class Tool(Protocol):
-    @property
-    def spec(self) -> ToolSpec:
-        ...
-
-    def run(self, arguments: Mapping[str, object], context: ToolContext) -> ToolResult:
-        ...
+@dataclass(frozen=True)
+class CollectedResponse:
+    assistant_text: str
+    tool_calls: tuple[ToolCall, ...]
+    parse_errors: tuple[ToolResult, ...]
+    token_usage: TokenUsage | None = None
 ```
 
-约定：
+字段说明：
 
-- 每个工具自行校验参数类型和必填字段。
-- 工具内部异常必须被包装为 `ToolResult(ok=False, ...)`。
-- 不把异常透出到 CLI 或 Provider。
+- `assistant_text`: 本轮模型输出的完整文本。
+- `tool_calls`: 本轮模型请求的全部工具调用。
+- `parse_errors`: 工具调用参数 JSON 解析失败等结构化错误。
+- `token_usage`: 本轮模型用量。
 
-### ToolRegistry
+### ToolSafety
+
+工具安全分类。
 
 ```python
-class ToolRegistry:
-    def register(self, tool: Tool) -> None:
-        ...
+ToolSafety = Literal["read", "side_effect"]
+```
 
-    def get(self, name: str) -> Tool:
-        ...
+分类规则：
 
-    def tool_specs(self) -> list[ToolSpec]:
-        ...
+- `read`: 无副作用工具，可并发执行。包括 `read_file`、`find_files`、`search_code`。
+- `side_effect`: 有副作用工具，必须串行执行。包括 `write_file`、`edit_file`、`run_command`。
 
-    def as_openai_tools(self) -> list[dict[str, object]]:
-        ...
+### ToolBatch
+
+一次模型响应中的工具调用批次。
+
+```python
+@dataclass(frozen=True)
+class ToolBatch:
+    safety: ToolSafety
+    calls: tuple[ToolCall, ...]
+```
+
+规则：
+
+- 相邻同类安全等级的工具调用归入同一批次。
+- `read` 批次可并发。
+- `side_effect` 批次串行。
+- 批次执行结果仍按原 `tool_call_id` 回写历史。
+
+### CancellationToken
+
+用户取消信号。
+
+```python
+class CancellationToken:
+    def cancel(self) -> None: ...
+    def is_cancelled(self) -> bool: ...
 ```
 
 用途：
 
-- 集中登记六个核心工具。
-- 按名称查找工具。
-- 向 Provider 提供工具声明。
-
-### ToolExecutor
-
-```python
-class ToolExecutor:
-    def execute(self, call: ToolCall) -> ToolResult:
-        ...
-```
-
-职责：
-
-- 查找工具。
-- 处理未知工具。
-- 捕获参数和执行错误。
-- 应用超时策略。
-- 返回结构化结果。
+- CLI 捕获 Ctrl+C 或后续取消命令时设置取消状态。
+- Agent 每轮模型调用前、工具批次前和工具执行后检查取消。
 
 ## 模块设计
 
@@ -276,347 +225,329 @@ class ToolExecutor:
 
 **职责：**
 
-- 扩展共享数据结构：`Message`、`StreamEvent`。
-- 新增工具相关类型：`ToolSpec`、`ToolContext`、`ToolResult`、`ToolCall`、`PendingToolCall`。
-- 保留现有 `ConfigError`、`ProviderError`。
-- 新增 `ToolError`，用于内部包装工具系统错误；对模型返回时转换为 `ToolResult`。
+- 扩展 Provider `StreamEvent`，允许 Provider 发出可选 `token_usage` 事件。
+- 新增或复用 `TokenUsage`，作为 Provider 和 Agent 之间的用量载体。
+- 保持 Provider `StreamEvent` 与 Agent `AgentEvent` 分离。
 
 **对外接口：**
 
-- dataclass 类型和用户可读异常。
+- 继续提供 `Message`、`ToolCall`、`ToolResult`、`StreamEvent`。
+- 新增 `TokenUsage`。
 
 **依赖：**
 
 - 标准库。
 
-### `mycode.tools.base`
+### `mycode.providers.*`
 
 **职责：**
 
-- 定义 `Tool` Protocol。
-- 定义工具参数读取辅助函数，例如必填字符串、布尔值、整数值校验。
-- 定义路径安全辅助函数，确保目标路径在 `workspace_root` 内。
+- 保持现有文本和工具调用流式事件转换。
+- 在供应商流式响应包含 token usage 时，转换为 `StreamEvent(type="token_usage")`。
+- 不保证所有供应商都有 token usage；无用量字段时不产生该事件。
 
 **对外接口：**
 
-- `Tool`
-- `require_str(arguments, key)`
-- `resolve_workspace_path(root, path)`
+- `LLMProvider.stream_chat(...) -> Iterator[StreamEvent]`
 
 **依赖：**
 
 - `mycode.types`
 
-### `mycode.tools.registry`
+### `mycode.agent.events`
 
 **职责：**
 
-- 实现 `ToolRegistry`。
-- 提供 `create_default_registry()`，登记六个核心工具。
-- 提供 OpenAI-compatible 工具声明转换。
+- 定义 `AgentEvent`、`AgentStopReason`、`TokenUsage`。
+- 提供事件构造辅助函数，减少 AgentRunner 中硬编码事件字段。
 
 **对外接口：**
 
-- `ToolRegistry`
-- `create_default_registry()`
-
-**依赖：**
-
-- `mycode.tools.files`
-- `mycode.tools.command`
-- `mycode.tools.search`
-
-### `mycode.tools.executor`
-
-**职责：**
-
-- 实现 `ToolExecutor`。
-- 执行 `ToolCall`。
-- 对未知工具、参数错误、执行异常和超时返回 `ToolResult(ok=False, ...)`。
-- 对所有工具应用统一 `ToolContext`。
-
-**对外接口：**
-
-- `ToolExecutor.execute(call)`
+- `AgentEvent`
+- `TokenUsage`
+- `progress_event(...)`
+- `done_event(...)`
 
 **依赖：**
 
 - `mycode.types`
-- `mycode.tools.registry`
 
-### `mycode.tools.files`
+### `mycode.agent.config`
 
 **职责：**
 
-- 实现 `ReadFileTool`。
-- 实现 `WriteFileTool`。
-- 实现 `EditFileTool`。
-- 所有路径必须限制在 `workspace_root` 内。
-- `EditFileTool` 使用 `old_text` 唯一匹配替换为 `new_text`。
+- 定义 `AgentConfig`、`AgentRequest`、`AgentMode`。
+- 维护默认最大迭代次数和未知工具阈值。
 
 **对外接口：**
 
-- 三个工具类。
-
-**参数设计：**
-
-- `read_file`: `path`
-- `write_file`: `path`, `content`
-- `edit_file`: `path`, `old_text`, `new_text`
+- `AgentConfig`
+- `AgentRequest`
 
 **依赖：**
 
-- `mycode.tools.base`
-- 标准库 `pathlib`
+- 标准库。
 
-### `mycode.tools.command`
-
-**职责：**
-
-- 实现 `RunCommandTool`。
-- 在 `workspace_root` 内执行命令。
-- 返回 `exit_code`、`stdout`、`stderr`。
-- 超时返回结构化失败。
-- 非零退出码不抛异常，作为 `ok=False` 工具结果返回。
-
-**参数设计：**
-
-- `command`: 命令字符串。
-- `timeout_seconds`: 可选，不能超过 `ToolContext.timeout_seconds`。
-
-**依赖：**
-
-- 标准库 `subprocess`
-- `mycode.tools.base`
-
-### `mycode.tools.search`
+### `mycode.agent.collector`
 
 **职责：**
 
-- 实现 `FindFilesTool`。
-- 实现 `SearchCodeTool`。
-- 搜索范围限制在 `workspace_root` 内。
-- 默认跳过 `.git`、`.venv`、`__pycache__`、二进制文件和常见缓存目录。
-- 对结果数量和输出字符数做限制。
-
-**参数设计：**
-
-- `find_files`: `pattern`
-- `search_code`: `query`, `regex`
-
-**依赖：**
-
-- 标准库 `pathlib`、`fnmatch`、`re`
-
-### `mycode.providers.base`
-
-**职责：**
-
-- 扩展 `LLMProvider.stream_chat()`，允许传入工具声明。
+- 消费 Provider 的 `StreamEvent`。
+- 一边把文本增量转换成 `AgentEvent(type="text_delta")` 实时发给界面。
+- 一边累计完整 `assistant_text`。
+- 拼接工具调用 JSON 参数碎片。
+- 生成 `CollectedResponse`。
+- 捕获 JSON 解析错误并转换为 `parse_errors`。
+- 转发 token usage 事件。
 
 **对外接口：**
 
 ```python
-class LLMProvider(Protocol):
-    def stream_chat(
+class StreamCollector:
+    def collect(
         self,
-        messages: Sequence[Message],
-        tools: Sequence[ToolSpec] = (),
-    ) -> Iterator[StreamEvent]:
+        events: Iterable[StreamEvent],
+    ) -> Iterator[AgentEvent | CollectedResponse]:
         ...
 ```
 
 **依赖：**
 
 - `mycode.types`
+- `mycode.agent.events`
 
-### `mycode.providers.openai`
+### `mycode.agent.tools`
 
 **职责：**
 
-- 继续处理 OpenAI-compatible 文本流。
-- 当存在工具声明时，在请求体加入 `tools`。
-- 把通用 `Message` 转换为 OpenAI Chat Completions 消息格式。
-- 解析 `choices[0].delta.tool_calls`，输出统一工具调用增量事件。
-- 在 `[DONE]` 时输出 `message_done`。
+- 定义工具安全分类。
+- 根据工具名判断 `read` 或 `side_effect`。
+- 创建 Plan Mode 只读工具注册中心。
+- 把工具调用按安全性切分成批次。
+
+**对外接口：**
+
+- `classify_tool(name)`
+- `create_readonly_registry(full_registry)`
+- `ToolBatcher.batch(calls)`
 
 **依赖：**
 
-- `mycode.providers.sse`
+- `mycode.tools.registry`
 - `mycode.types`
 
-### `mycode.providers.deepseek`
+### `mycode.agent.executor`
 
 **职责：**
 
-- 继续复用 OpenAI-compatible 工具声明和流式解析逻辑。
-- 保持独立类，便于后续扩展 DeepSeek 专用行为。
+- 执行 `ToolBatch`。
+- `read` 批次使用线程池并发执行。
+- `side_effect` 批次按原顺序串行执行。
+- 每个工具调用发出 `tool_call_started` 和 `tool_result` 事件。
+- 保证结果按 `tool_call_id` 与历史回写关联。
+- 检查取消信号。
+
+**对外接口：**
+
+```python
+class BatchToolExecutor:
+    def execute_batches(
+        self,
+        batches: Sequence[ToolBatch],
+        cancellation: CancellationToken,
+    ) -> Iterator[AgentEvent | tuple[str, ToolResult]]:
+        ...
+```
 
 **依赖：**
 
-- `mycode.providers.openai`
+- `mycode.tools.executor`
+- `mycode.agent.events`
+- `mycode.agent.tools`
 
-### `mycode.providers.anthropic`
+### `mycode.agent.runner`
 
 **职责：**
 
-- 把通用 `ToolSpec` 转换为 Anthropic tools 格式。
-- 把通用 `Message` 转换为 Anthropic Messages 格式，包括 tool result。
-- 解析 Anthropic `content_block_start`、`input_json_delta`、`content_block_stop`、`message_stop` 等事件，输出统一工具调用事件。
-- 保持 Claude extended thinking 行为。
+- 实现 ReAct Agent Loop。
+- 维护会话历史。
+- 选择当前模式下可用工具集合。
+- 每轮调用 Provider、StreamCollector、ToolBatcher、BatchToolExecutor。
+- 处理停止条件。
+- 产出统一 `AgentEvent`。
+
+**对外接口：**
+
+```python
+class AgentRunner:
+    def __init__(
+        self,
+        provider: LLMProvider,
+        full_registry: ToolRegistry,
+        tool_context: ToolContext,
+        config: AgentConfig = AgentConfig(),
+    ) -> None:
+        ...
+
+    def run(
+        self,
+        request: AgentRequest,
+        cancellation: CancellationToken | None = None,
+    ) -> Iterator[AgentEvent]:
+        ...
+```
+
+**停止条件处理：**
+
+- `completed`: 收集响应后没有工具调用。
+- `max_iterations`: 当前迭代达到 `max_iterations`。
+- `cancelled`: cancellation token 已取消。
+- `unknown_tools`: 连续未知工具调用达到阈值。
+- `stream_error`: Provider 抛出 `ProviderError` 或流式响应中断。
+- `tool_parse_error`: 工具参数解析错误达到无法继续执行的程度。
 
 **依赖：**
 
-- `mycode.providers.sse`
+- `mycode.providers.base`
+- `mycode.tools.registry`
 - `mycode.types`
+- `mycode.agent.collector`
+- `mycode.agent.executor`
+- `mycode.agent.tools`
 
 ### `mycode.session`
 
 **职责：**
 
-- 编排用户输入、Provider 流式响应、工具调用收集、工具执行和一次结果回灌。
-- 普通文本请求保持现有行为。
-- 工具请求后最多执行一轮工具并发起一次后续模型请求。
-- 后续模型请求如果再次请求工具，本阶段不继续执行，返回可读错误事件或停止。
-
-**对外接口：**
-
-```python
-class ChatSession:
-    def __init__(
-        self,
-        provider: LLMProvider,
-        tool_registry: ToolRegistry | None = None,
-        tool_context: ToolContext | None = None,
-    ) -> None:
-        ...
-
-    def send(self, user_text: str) -> Iterator[StreamEvent]:
-        ...
-```
+- 从本阶段开始不再承载 Agent Loop 主逻辑。
+- 可保留现有 `ChatSession` 作为兼容层，内部委托 `AgentRunner` 或继续供旧测试使用。
+- 避免新增复杂逻辑到 `ChatSession`。
 
 **依赖：**
 
-- `mycode.providers.base`
-- `mycode.tools.executor`
-- `mycode.tools.registry`
-- `mycode.types`
+- `mycode.agent.runner`
 
 ### `mycode.cli`
 
 **职责：**
 
-- 创建默认工具注册中心和工具上下文。
-- 把工作区根目录设置为当前进程启动目录。
-- 打印文本增量。
-- 打印工具开始和结束状态。
-- 保持退出命令和错误处理行为。
+- 解析 `/plan`、`/do` 和普通输入。
+- 创建 `AgentRunner`。
+- 捕获 Ctrl+C 并触发取消。
+- 消费 `AgentEvent` 并展示文本、进度、工具状态和停止原因。
+- 不直接拼接工具参数，不执行工具，不判断循环。
+
+**展示策略：**
+
+- 文本增量继续实时输出。
+- 进度事件简短显示，例如 `iteration 2/8`。
+- 工具事件沿用当前 `[tool]` 风格，本阶段不做折叠 UI。
+- done/error 事件显示停止原因。
 
 **依赖：**
 
-- `mycode.session`
+- `mycode.agent.runner`
+- `mycode.agent.config`
 - `mycode.tools.registry`
-- `mycode.types`
 
 ## 模块交互
 
-### 普通聊天路径
+### 普通 Agent Loop
 
 ```text
 CLI
-  → ChatSession.send(user_text)
-  → Provider.stream_chat(messages, tools)
-  → text_delta/message_done
-  → CLI 打印文本
-  → ChatSession 追加 assistant 文本历史
+  → AgentRunner.run(AgentRequest(mode="default"))
+  → AgentEvent(progress iteration=1)
+  → Provider.stream_chat(messages, full_tools)
+  → StreamCollector 转发 text_delta 并收集 tool_calls
+  → ToolBatcher.batch(tool_calls)
+  → BatchToolExecutor.execute_batches(...)
+  → tool results append to history
+  → 下一轮 Provider.stream_chat(...)
+  → 无 tool_calls
+  → AgentEvent(done stop_reason="completed")
 ```
 
-### 工具调用路径
+### Plan Mode
 
 ```text
-CLI
-  → ChatSession.send(user_text)
-  → Provider.stream_chat(messages, tools)
-  → tool_call_delta/tool_call_done
-  → ChatSession 拼接并解析工具参数
-  → ToolExecutor.execute(ToolCall)
-  → ToolResult
-  → ChatSession 追加 assistant tool_calls 和 tool result 消息
-  → Provider.stream_chat(updated_messages, tools=())
-  → text_delta/message_done
-  → CLI 打印最终回复
+用户输入 /plan <task>
+  → AgentRequest(mode="plan")
+  → AgentRunner 使用 read-only registry
+  → 模型只能调用 read_file/find_files/search_code
+  → 输出计划文本
+  → done completed
 ```
 
-### 错误路径
+### Do Mode
 
 ```text
-工具错误 / 未知工具 / JSON 解析失败 / 超时
-  → ToolResult(ok=False, message=...)
-  → 作为 tool 消息写入历史
-  → Provider 基于错误结果生成回复
+用户输入 /do <task>
+  → AgentRequest(mode="do")
+  → AgentRunner 使用 full registry
+  → 可执行读写改命令搜索
+  → 多轮循环直到完成或停止条件触发
 ```
 
-Provider 网络错误仍按现有 `ProviderError` 处理，由 CLI 展示并继续会话。
+### 取消路径
+
+```text
+CLI 捕获 Ctrl+C
+  → cancellation.cancel()
+  → AgentRunner 在下一检查点停止
+  → AgentEvent(done stop_reason="cancelled")
+```
 
 ## 文件组织
 
 ```text
 src/mycode/
-  types.py                       # 扩展共享类型
-  session.py                     # 单轮工具闭环编排
-  cli.py                         # 创建工具系统并展示状态
-  providers/
-    base.py                      # Provider 接口扩展
-    openai.py                    # OpenAI-compatible 工具调用解析
-    deepseek.py                  # DeepSeek 复用 OpenAI-compatible
-    anthropic.py                 # Anthropic 工具调用解析
-  tools/
-    __init__.py                  # 工具包导出
-    base.py                      # Tool 接口、参数校验、路径安全
-    registry.py                  # 注册中心和默认工具集合
-    executor.py                  # 工具执行、超时、错误包装
-    files.py                     # read/write/edit 文件工具
-    command.py                   # run_command 工具
-    search.py                    # find_files/search_code 工具
+  types.py                         # 补充 TokenUsage 或基础事件字段
+  cli.py                           # 切换到 AgentRunner 事件消费
+  session.py                       # 保留兼容层，避免继续承载循环复杂度
+  agent/
+    __init__.py                    # Agent 包导出
+    config.py                      # AgentConfig、AgentRequest、AgentMode
+    events.py                      # AgentEvent、TokenUsage、停止原因
+    cancellation.py                # CancellationToken
+    collector.py                   # StreamCollector 双路收集
+    tools.py                       # 工具安全分类、只读 registry、批处理
+    executor.py                    # BatchToolExecutor
+    runner.py                      # AgentRunner ReAct 循环
 tests/
-  test_tools_files.py            # 文件工具测试
-  test_tools_command.py          # 命令工具测试
-  test_tools_search.py           # 搜索工具测试
-  test_tools_registry.py         # 注册中心测试
-  test_tool_executor.py          # 执行器错误和超时测试
-  test_tool_streaming.py         # 流式工具调用参数拼接测试
-  test_session_tools.py          # 工具结果回灌和单轮停止测试
-  test_providers.py              # Provider 工具声明和事件解析扩展测试
-  test_cli.py                    # 工具状态展示测试
+  test_agent_collector.py          # 流式双路收集和解析错误测试
+  test_agent_tools.py              # 工具安全分类、Plan Mode 工具限制、批处理测试
+  test_agent_executor.py           # 并发读批次、串行副作用批次、取消测试
+  test_agent_runner.py             # 正常完成、迭代上限、未知工具、流错误测试
+  test_cli.py                      # /plan、/do、事件展示、取消回归测试
+  test_session.py                  # 兼容层回归测试
 ```
 
 ## 技术决策
 
 | 决策点 | 选择 | 理由 |
 |--------|------|------|
-| 工具声明格式 | 工具层使用通用 `ToolSpec`，Provider 负责转换 | 避免工具系统绑定 OpenAI 或 Anthropic |
-| 工具执行位置 | `ChatSession` 编排，`ToolExecutor` 执行 | 保持 CLI 轻量，避免 Provider 知道本地工具 |
-| 工具调用轮数 | 一次用户输入最多一轮工具执行和一次结果回灌 | 严格满足 spec，避免提前实现 Agent Loop |
-| 改文件方式 | `old_text` 唯一匹配替换 | 简单、可测试、失败边界清晰 |
-| 路径安全 | 所有路径解析后必须位于 `workspace_root` 内 | 降低本地工具越权风险 |
-| 命令执行 | `subprocess.run(..., cwd=workspace_root, timeout=...)` | 标准库即可满足本阶段需求 |
-| 命令失败处理 | 非零退出码返回 `ToolResult(ok=False)` | 让模型看到失败并调整，而不是让程序崩溃 |
-| 搜索实现 | 标准库遍历、`fnmatch`、`re` | 避免新增外部依赖；后续可替换为 ripgrep |
-| 输出限制 | 工具结果统一按 `max_output_chars` 截断 | 防止大文件、大命令输出污染上下文 |
-| 后续工具请求 | 工具结果回灌后的第二轮不执行新工具 | 保证本阶段没有隐式循环 |
+| Agent 主体位置 | 新增 `mycode.agent` 包 | 避免继续膨胀 `ChatSession` 和 CLI |
+| 事件模型 | 新增 `AgentEvent`，不直接暴露 Provider `StreamEvent` | 保持 Agent 与界面解耦，后续 UI 可替换 |
+| 流式收集 | `StreamCollector` 既转发文本又返回完整响应 | 满足实时展示和循环判断双需求 |
+| 停止条件 | 用结构化 `AgentStopReason` | 便于测试和 CLI 展示 |
+| 迭代上限默认值 | `max_iterations=8` | 足够完成小任务，同时避免失控循环 |
+| 未知工具阈值 | 连续 2 次未知工具后停止 | 给模型一次纠正机会，但避免空转 |
+| 多工具执行 | 读类并发，副作用串行 | 平衡效率和安全 |
+| Plan Mode 工具集合 | 只开放 `read_file`、`find_files`、`search_code` | 满足计划阶段观察项目且无副作用 |
+| `/do` 语义 | 使用完整工具集合执行输入任务或已有计划上下文 | 符合两段式，但不实现人工审批恢复流 |
+| Token 用量 | 事件字段可为空 | 兼容不同供应商能力差异 |
+| 权限确认 | 本阶段不做 | 遵守 spec，留给后续权限系统 |
 
 ## Spec 覆盖关系
 
-- F1、AC1：由 `Tool`、`ToolSpec` 覆盖。
-- F2-F5、AC2-AC5：由 `mycode.tools.files` 覆盖。
-- F6、F14、F20、AC6-AC7：由 `RunCommandTool`、`ToolExecutor`、`ToolContext` 覆盖。
-- F7-F8、AC8-AC9：由 `mycode.tools.search` 覆盖。
-- F9-F10、AC10-AC11：由 `ToolRegistry` 覆盖。
-- F11-F12、AC12：由 Provider 工具事件和 `PendingToolCall` 拼接覆盖。
-- F13、F15、AC13：由 `ToolExecutor` 和 `ToolResult` 覆盖。
-- F16-F17、AC14-AC15：由 `ChatSession` 单轮编排覆盖。
-- F18、AC17：由 CLI 工具状态事件展示覆盖。
-- F19、N4：由 `resolve_workspace_path()` 和 `ToolContext.workspace_root` 覆盖。
-- N5、AC16：普通文本事件路径保持兼容。
-- N6、AC18：由新增测试文件覆盖。
-- N7：README 和验收文档将明确本阶段不是完整 Agent Loop。
+- F1-F2、AC1-AC2：由 `AgentRunner` 多轮 ReAct 循环覆盖。
+- F3-F6、AC3-AC6：由 `AgentStopReason` 和 `AgentRunner` 停止条件覆盖。
+- F7-F8、AC7：由 `StreamCollector` 双路收集覆盖。
+- F9-F10、AC8-AC9：由 `AgentEvent` 事件流和 CLI 事件消费覆盖。
+- F11-F13、AC10-AC13：由 `ToolBatcher`、`BatchToolExecutor` 和历史回写覆盖。
+- F14、AC14：由 `progress` 事件覆盖。
+- F15：通过复用 `ToolRegistry`、`ToolExecutor`、`ToolResult` 覆盖。
+- F16-F18、AC15-AC17：由 `AgentMode`、只读 registry、`/plan` 和 `/do` 解析覆盖。
+- F19-F20、AC18-AC19：由 CLI 默认进入 `AgentRunner` 和无工具普通聊天路径覆盖。
+- AC20：由新增 Agent 测试和现有回归测试覆盖。

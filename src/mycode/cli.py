@@ -1,16 +1,17 @@
 from __future__ import annotations
 
 import argparse
+from pathlib import Path
 import sys
 from collections.abc import Sequence
-from pathlib import Path
 
 from prompt_toolkit import prompt
 
 from .config import load_config
 from .providers.factory import create_provider
 from .session import ChatSession
-from .types import ConfigError, ProviderError
+from .tools.registry import create_default_registry
+from .types import ConfigError, ProviderError, ToolContext
 
 
 EXIT_COMMANDS = {"exit", "quit", "退出"}
@@ -33,7 +34,11 @@ def main(argv: Sequence[str] | None = None) -> int:
         print(f"配置错误：{exc.user_message}", file=sys.stderr)
         return 1
 
-    session = ChatSession(provider)
+    session = ChatSession(
+        provider,
+        tool_registry=create_default_registry(),
+        tool_context=ToolContext(workspace_root=Path.cwd()),
+    )
     print("myCode 已启动。输入 exit、quit 或 退出 结束。")
 
     while True:
@@ -60,6 +65,13 @@ def main(argv: Sequence[str] | None = None) -> int:
                         print("● ", end="", flush=True)
                         assistant_started = True
                     print(event.text, end="", flush=True)
+                elif event.type == "tool_started":
+                    print(f"\n[tool] {event.tool_name} 开始", flush=True)
+                elif event.type == "tool_finished":
+                    result = event.tool_result
+                    status = "成功" if result and result.ok else "失败"
+                    message = result.message if result else ""
+                    print(f"[tool] {event.tool_name} {status}：{message}", flush=True)
             print()
         except ProviderError as exc:
             print(f"请求错误：{exc.user_message}", file=sys.stderr)

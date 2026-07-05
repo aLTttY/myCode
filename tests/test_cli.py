@@ -3,11 +3,11 @@ from collections.abc import Iterator, Sequence
 import pytest
 
 from mycode import cli
-from mycode.types import AppConfig, ConfigError, Message, ProviderError, StreamEvent
+from mycode.types import AppConfig, ConfigError, Message, ProviderError, StreamEvent, ToolResult
 
 
 class FakeSession:
-    def __init__(self, provider: object) -> None:
+    def __init__(self, provider: object, *args: object, **kwargs: object) -> None:
         self.provider = provider
 
     def send(self, user_text: str) -> Iterator[StreamEvent]:
@@ -15,6 +15,22 @@ class FakeSession:
             raise ProviderError("供应商失败")
         yield StreamEvent(type="text_delta", text="你")
         yield StreamEvent(type="text_delta", text="好")
+        yield StreamEvent(type="message_done")
+
+
+class ToolEventSession:
+    def __init__(self, provider: object, *args: object, **kwargs: object) -> None:
+        self.provider = provider
+
+    def send(self, user_text: str) -> Iterator[StreamEvent]:
+        yield StreamEvent(type="tool_started", tool_call_id="1", tool_name="read_file")
+        yield StreamEvent(
+            type="tool_finished",
+            tool_call_id="1",
+            tool_name="read_file",
+            tool_result=ToolResult(ok=True, message="完成", data={}),
+        )
+        yield StreamEvent(type="text_delta", text="done")
         yield StreamEvent(type="message_done")
 
 
@@ -79,3 +95,16 @@ def test_read_user_input_uses_prompt_toolkit(monkeypatch: pytest.MonkeyPatch) ->
 
     assert cli.read_user_input("> ") == "我叫什么名字"
     assert calls == ["> "]
+
+
+def test_cli_prints_tool_events(monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]) -> None:
+    inputs = iter(["tool", "exit"])
+    monkeypatch.setattr(cli, "load_config", lambda path: AppConfig("deepseek", "m", "u", "k"))
+    monkeypatch.setattr(cli, "create_provider", lambda config: object())
+    monkeypatch.setattr(cli, "ChatSession", ToolEventSession)
+    monkeypatch.setattr(cli, "read_user_input", lambda prompt: next(inputs))
+
+    assert cli.main([]) == 0
+    output = capsys.readouterr().out
+    assert "[tool] read_file 开始" in output
+    assert "[tool] read_file 成功：完成" in output

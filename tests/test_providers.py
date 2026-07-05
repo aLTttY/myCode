@@ -9,7 +9,7 @@ from mycode.providers.anthropic import AnthropicProvider
 from mycode.providers.deepseek import DeepSeekProvider
 from mycode.providers.factory import create_provider
 from mycode.providers.openai import OpenAIProvider
-from mycode.types import AppConfig, ConfigError, Message, StreamEvent, ThinkingConfig
+from mycode.types import AppConfig, ConfigError, Message, StreamEvent, ThinkingConfig, ToolCall, ToolSpec
 
 
 def config(protocol: str) -> AppConfig:
@@ -79,6 +79,34 @@ def test_openai_provider_converts_stream_events() -> None:
     ]
 
 
+def test_openai_provider_builds_tool_messages_and_tools() -> None:
+    provider = OpenAIProvider(config("openai"))
+    tool = ToolSpec(name="read_file", description="Read", parameters={"type": "object"})
+    message = Message(
+        role="assistant",
+        content="",
+        tool_calls=(ToolCall(id="1", name="read_file", arguments={"path": "a.txt"}),),
+    )
+
+    assert provider._convert_message(message)["tool_calls"][0]["function"]["name"] == "read_file"
+    assert provider._convert_message(Message(role="tool", content="{}", tool_call_id="1"))["role"] == "tool"
+
+
+def test_openai_provider_parses_tool_call_stream() -> None:
+    provider = OpenAIProvider(config("openai"))
+    response = FakeSseResponse([
+        "data: " + json.dumps({"choices": [{"delta": {"tool_calls": [{"index": 0, "id": "1", "function": {"name": "read_file", "arguments": "{\"path\""}}]}}]}),
+        "data: " + json.dumps({"choices": [{"delta": {"tool_calls": [{"index": 0, "function": {"arguments": ": \"a.txt\"}"}}]}, "finish_reason": "tool_calls"}]}),
+        "data: [DONE]",
+    ])
+
+    events = list(provider._iter_events(response))
+
+    assert events[0].type == "tool_call_delta"
+    assert events[1].arguments_delta == ': "a.txt"}'
+    assert events[2] == StreamEvent(type="tool_call_done", tool_call_id="1", tool_name="read_file")
+
+
 def test_deepseek_provider_reuses_openai_stream_events() -> None:
     provider = DeepSeekProvider(config("deepseek"))
     response = FakeSseResponse([openai_line("DeepSeek"), "data: [DONE]"])
@@ -126,6 +154,36 @@ def test_anthropic_provider_includes_thinking_when_enabled() -> None:
     payload = provider._build_payload([Message(role="user", content="hi")])
 
     assert payload["thinking"] == {"type": "enabled", "budget_tokens": 2048}
+
+
+def test_anthropic_provider_builds_tool_messages_and_tools() -> None:
+    provider = AnthropicProvider(config("anthropic"))
+    tool = ToolSpec(name="read_file", description="Read", parameters={"type": "object"})
+    payload = provider._build_payload([Message(role="user", content="hi")], [tool])
+    assistant = provider._convert_message(
+        Message(role="assistant", content="", tool_calls=(ToolCall(id="1", name="read_file", arguments={}),))
+    )
+    tool_result = provider._convert_message(Message(role="tool", content="{}", tool_call_id="1"))
+
+    assert payload["tools"][0]["input_schema"] == {"type": "object"}
+    assert assistant["content"][0]["type"] == "tool_use"
+    assert tool_result["content"][0]["type"] == "tool_result"
+
+
+def test_anthropic_provider_parses_tool_call_stream() -> None:
+    provider = AnthropicProvider(config("anthropic"))
+    response = FakeSseResponse([
+        "data: " + json.dumps({"type": "content_block_start", "index": 0, "content_block": {"type": "tool_use", "id": "1", "name": "read_file"}}),
+        "data: " + json.dumps({"type": "content_block_delta", "index": 0, "delta": {"partial_json": "{\"path\": \"a.txt\"}"}}),
+        "data: " + json.dumps({"type": "content_block_stop", "index": 0}),
+        "data: " + json.dumps({"type": "message_stop"}),
+    ])
+
+    events = list(provider._iter_events(response))
+
+    assert events[0] == StreamEvent(type="tool_call_delta", tool_call_id="1", tool_name="read_file")
+    assert events[1].arguments_delta == '{"path": "a.txt"}'
+    assert events[2] == StreamEvent(type="tool_call_done", tool_call_id="1", tool_name="read_file")
 
 
 def test_anthropic_provider_omits_thinking_when_disabled() -> None:

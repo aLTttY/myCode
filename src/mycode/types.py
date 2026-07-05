@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Literal
 
 
@@ -21,14 +22,62 @@ class AppConfig:
 
 @dataclass(frozen=True)
 class Message:
-    role: Literal["user", "assistant"]
+    role: Literal["user", "assistant", "tool"]
     content: str
+    tool_calls: tuple[ToolCall, ...] = ()
+    tool_call_id: str = ""
 
 
 @dataclass(frozen=True)
 class StreamEvent:
-    type: Literal["text_delta", "message_done"]
+    type: Literal[
+        "text_delta",
+        "message_done",
+        "tool_call_delta",
+        "tool_call_done",
+        "tool_started",
+        "tool_finished",
+    ]
     text: str = ""
+    tool_call_id: str = ""
+    tool_name: str = ""
+    arguments_delta: str = ""
+    tool_result: ToolResult | None = None
+
+
+@dataclass(frozen=True)
+class ToolSpec:
+    name: str
+    description: str
+    parameters: dict[str, object]
+
+
+@dataclass(frozen=True)
+class ToolContext:
+    workspace_root: Path
+    timeout_seconds: float = 10.0
+    max_output_chars: int = 20_000
+
+
+@dataclass(frozen=True)
+class ToolResult:
+    ok: bool
+    message: str
+    data: dict[str, object]
+
+
+@dataclass(frozen=True)
+class ToolCall:
+    id: str
+    name: str
+    arguments: dict[str, object]
+
+
+@dataclass
+class PendingToolCall:
+    id: str
+    name: str
+    arguments_json_parts: list[str]
 
 
 class UserFacingError(Exception):
@@ -42,4 +91,8 @@ class ConfigError(UserFacingError):
 
 
 class ProviderError(UserFacingError):
+    pass
+
+
+class ToolError(UserFacingError):
     pass

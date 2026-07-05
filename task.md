@@ -1,295 +1,330 @@
-# myCode MVP Tasks
+# myCode 工具系统 Tasks
 
 ## 文件清单
 
 | 操作 | 文件 | 职责 |
 |------|------|------|
-| 新建 | `pyproject.toml` | 项目元数据、依赖、pytest 配置、`mycode` 命令入口 |
-| 新建 | `README.md` | 运行方式、配置说明、Provider 支持范围、安全说明 |
-| 新建 | `config.example.yaml` | 示例配置，使用环境变量形式 API Key |
-| 已有 | `spec.md` | 已批准需求文档 |
-| 已有 | `plan.md` | 已批准技术设计文档 |
-| 新建 | `src/mycode/__init__.py` | 包初始化和版本号 |
-| 新建 | `src/mycode/__main__.py` | 支持 `python -m mycode` |
-| 新建 | `src/mycode/types.py` | 共享 dataclass、Protocol 相关类型和异常 |
-| 新建 | `src/mycode/config.py` | YAML 配置加载、校验和环境变量解析 |
-| 新建 | `src/mycode/session.py` | 当前进程内多轮会话管理 |
-| 新建 | `src/mycode/cli.py` | CLI 参数解析和简单交互循环 |
-| 新建 | `src/mycode/providers/__init__.py` | Provider 包初始化 |
-| 新建 | `src/mycode/providers/base.py` | Provider 抽象接口 |
-| 新建 | `src/mycode/providers/factory.py` | Provider 工厂 |
-| 新建 | `src/mycode/providers/sse.py` | SSE data 行解析 |
-| 新建 | `src/mycode/providers/openai.py` | OpenAI Chat Completions 流式 Provider |
-| 新建 | `src/mycode/providers/deepseek.py` | DeepSeek OpenAI-compatible Provider |
-| 新建 | `src/mycode/providers/anthropic.py` | Anthropic Messages 流式 Provider |
-| 新建 | `tests/test_config.py` | 配置解析测试 |
-| 新建 | `tests/test_session.py` | 会话历史和流式汇总测试 |
-| 新建 | `tests/test_sse.py` | SSE 解析测试 |
-| 新建 | `tests/test_providers.py` | Provider 事件转换测试 |
-| 新建 | `tests/test_cli.py` | CLI 参数、退出和错误展示测试 |
+| 已有 | `spec.md` | 已批准工具系统需求文档 |
+| 已有 | `plan.md` | 已批准工具系统技术设计文档 |
+| 修改 | `src/mycode/types.py` | 扩展消息、流式事件、工具调用和工具结果类型 |
+| 修改 | `src/mycode/providers/base.py` | 扩展 Provider 接口以接收工具声明 |
+| 修改 | `src/mycode/providers/openai.py` | 支持 OpenAI-compatible 工具声明、工具调用流式解析和工具消息格式 |
+| 修改 | `src/mycode/providers/deepseek.py` | 继续复用 OpenAI-compatible 工具能力 |
+| 修改 | `src/mycode/providers/anthropic.py` | 支持 Anthropic 工具声明、工具调用流式解析和工具结果消息格式 |
+| 修改 | `src/mycode/session.py` | 编排单轮工具调用、工具执行和一次结果回灌 |
+| 修改 | `src/mycode/cli.py` | 初始化工具系统并展示工具执行状态 |
+| 新建 | `src/mycode/tools/__init__.py` | 工具包导出 |
+| 新建 | `src/mycode/tools/base.py` | Tool 接口、参数校验、路径安全工具 |
+| 新建 | `src/mycode/tools/registry.py` | 工具注册中心和默认工具集合 |
+| 新建 | `src/mycode/tools/executor.py` | 工具执行器、错误包装和超时处理 |
+| 新建 | `src/mycode/tools/files.py` | 读文件、写文件、原文唯一替换工具 |
+| 新建 | `src/mycode/tools/command.py` | 执行命令工具 |
+| 新建 | `src/mycode/tools/search.py` | 按模式找文件和搜索代码内容工具 |
+| 修改 | `README.md` | 说明工具系统能力和非 Agent Loop 边界 |
+| 修改 | `tests/test_providers.py` | 扩展 Provider 工具声明、消息转换和工具事件解析测试 |
+| 修改 | `tests/test_cli.py` | 扩展 CLI 工具状态展示测试 |
+| 新建 | `tests/test_tools_files.py` | 文件工具测试 |
+| 新建 | `tests/test_tools_command.py` | 命令工具测试 |
+| 新建 | `tests/test_tools_search.py` | 搜索工具测试 |
+| 新建 | `tests/test_tools_registry.py` | 注册中心测试 |
+| 新建 | `tests/test_tool_executor.py` | 工具执行器错误和超时测试 |
+| 新建 | `tests/test_tool_streaming.py` | JSON 参数碎片拼接测试 |
+| 新建 | `tests/test_session_tools.py` | 工具结果回灌和单轮停止测试 |
 
-## T1: 初始化 Python 项目骨架
+## T1: 扩展共享类型
 
-**文件：** `pyproject.toml`, `src/mycode/__init__.py`, `src/mycode/__main__.py`, `src/mycode/providers/__init__.py`
+**文件：** `src/mycode/types.py`
 
-**依赖：** 无
+**依赖：** 已批准 `spec.md`、`plan.md`
 
 **步骤：**
 
-1. 创建 `src/` layout。
-2. 在 `pyproject.toml` 中声明项目名、Python 版本、依赖 `httpx`、`PyYAML`、开发依赖 `pytest`。
-3. 配置 console script：`mycode = "mycode.cli:main"`。
-4. 添加包初始化文件。
-5. 添加 `__main__.py`，调用 `mycode.cli.main()`。
+1. 增加 `ToolSpec`、`ToolContext`、`ToolResult`、`ToolCall`、`PendingToolCall`。
+2. 扩展 `Message.role`，支持 `tool` 消息。
+3. 为 `Message` 增加 `tool_calls` 和 `tool_call_id` 字段。
+4. 扩展 `StreamEvent.type`，支持 `tool_call_delta`、`tool_call_done`、`tool_started`、`tool_finished`。
+5. 为 `StreamEvent` 增加工具调用 ID、工具名、参数增量和工具结果字段。
+6. 增加 `ToolError`，用于工具系统内部错误表达。
+7. 保持现有文本聊天字段向后兼容。
 
-**验证：** 运行 `python -m compileall src`，期望无语法错误。
+**验证：** 运行 `python -m compileall src/mycode/types.py`，期望无语法错误。
 
-## T2: 定义共享类型和异常
+## T2: 实现工具基础设施
 
-**文件：** `src/mycode/types.py`
+**文件：** `src/mycode/tools/__init__.py`, `src/mycode/tools/base.py`
 
 **依赖：** T1
 
 **步骤：**
 
-1. 定义 `ThinkingConfig`。
-2. 定义 `AppConfig`。
-3. 定义 `Message`。
-4. 定义 `StreamEvent`。
-5. 定义带 `user_message` 的 `ConfigError` 和 `ProviderError`。
-6. 确保类型只表达第一阶段需要的 user/assistant 文本消息。
+1. 定义 `Tool` Protocol，包含 `spec` 和 `run()`。
+2. 实现必填字符串参数读取辅助函数。
+3. 实现可选布尔值、整数值、浮点数参数读取辅助函数。
+4. 实现 `resolve_workspace_path()`，把相对路径解析到 `workspace_root` 下。
+5. 对绝对路径、`..` 越界路径和符号链接解析后的越界路径返回 `ToolError`。
+6. 实现工具结果输出截断辅助函数。
+7. 在 `__init__.py` 中导出基础类型和工具类入口。
 
-**验证：** 运行 `python -m compileall src/mycode/types.py`，期望无语法错误。
+**验证：** 运行 `python -m compileall src/mycode/tools`，期望无语法错误。
 
-## T3: 实现配置加载与校验
+## T3: 实现文件工具
 
-**文件：** `src/mycode/config.py`, `tests/test_config.py`
+**文件：** `src/mycode/tools/files.py`, `tests/test_tools_files.py`
 
-**依赖：** T2
-
-**步骤：**
-
-1. 实现 `load_config(path)` 读取 YAML。
-2. 校验 `protocol`、`model`、`base_url`、`api_key` 四个必填字段。
-3. 限制 `protocol` 为 `openai`、`anthropic`、`deepseek`。
-4. 实现 `${ENV_NAME}` 环境变量解析。
-5. 环境变量不存在或为空时抛出 `ConfigError`。
-6. 解析可选 `thinking.enabled` 和 `thinking.budget_tokens`。
-7. 校验 `thinking.budget_tokens` 非空时必须为正整数。
-8. 编写配置成功、缺字段、协议不支持、环境变量缺失、thinking 配置的测试。
-
-**验证：** 运行 `pytest tests/test_config.py`，期望全部通过。
-
-## T4: 实现 Provider 抽象和工厂
-
-**文件：** `src/mycode/providers/base.py`, `src/mycode/providers/factory.py`, `tests/test_providers.py`
-
-**依赖：** T2
+**依赖：** T1, T2
 
 **步骤：**
 
-1. 在 `base.py` 定义 `LLMProvider` Protocol。
-2. 在 `factory.py` 根据 `AppConfig.protocol` 返回具体 Provider。
-3. 暂时引用后续 Provider 类名，确保工厂边界清晰。
-4. 对未知协议抛出 `ConfigError`。
-5. 编写工厂选择 OpenAI、Anthropic、DeepSeek 的测试。
+1. 实现 `ReadFileTool`，参数为 `path`。
+2. 读取工作区内文件并返回 `content`、`path`、`size`。
+3. 对不存在、目录路径、越界路径返回结构化失败。
+4. 实现 `WriteFileTool`，参数为 `path`、`content`。
+5. 写入工作区内文件，必要时创建父目录，并返回写入字节数或字符数。
+6. 对越界路径和写入失败返回结构化失败。
+7. 实现 `EditFileTool`，参数为 `path`、`old_text`、`new_text`。
+8. 当 `old_text` 唯一出现时替换并返回成功。
+9. 当匹配 0 次或多次时不修改文件，并返回明确失败原因。
+10. 编写成功读取、越界读取、成功写入、越界写入、唯一替换、0 次匹配、多次匹配测试。
 
-**验证：** 运行 `pytest tests/test_providers.py -k factory`，期望全部通过。
+**验证：** 运行 `pytest tests/test_tools_files.py`，期望全部通过。
 
-## T5: 实现 SSE 解析工具
+## T4: 实现命令工具
 
-**文件：** `src/mycode/providers/sse.py`, `tests/test_sse.py`
+**文件：** `src/mycode/tools/command.py`, `tests/test_tools_command.py`
 
-**依赖：** T2
-
-**步骤：**
-
-1. 实现 `iter_sse_data_lines(response)`。
-2. 从响应字节/文本行中提取 `data:` 内容。
-3. 忽略空行、注释行和 keep-alive 行。
-4. 保留 `[DONE]` 作为上层可识别的结束标记。
-5. 对底层迭代异常包装为 `ProviderError`。
-6. 编写普通 data 行、空行、`[DONE]`、异常包装测试。
-
-**验证：** 运行 `pytest tests/test_sse.py`，期望全部通过。
-
-## T6: 实现 OpenAI Provider
-
-**文件：** `src/mycode/providers/openai.py`, `tests/test_providers.py`
-
-**依赖：** T2, T5
+**依赖：** T1, T2
 
 **步骤：**
 
-1. 实现 `OpenAIProvider.__init__(config)`。
-2. 将通用 `Message` 转换为 OpenAI `messages`。
-3. 使用 `httpx` 同步客户端发送 `{base_url}/chat/completions`。
-4. 请求 header 使用 Bearer token。
-5. 请求体包含 `model`、`messages`、`stream: true`。
-6. 解析 `choices[0].delta.content` 为 `text_delta`。
-7. 解析 `[DONE]` 为 `message_done`。
-8. HTTP 状态错误、JSON 错误、流中断包装为 `ProviderError`。
-9. 用 fake stream 测试文本增量、结束事件和错误路径。
+1. 实现 `RunCommandTool`，参数为 `command` 和可选 `timeout_seconds`。
+2. 使用 `workspace_root` 作为命令工作目录。
+3. 返回 `exit_code`、`stdout`、`stderr`。
+4. 成功退出码返回 `ok=True`。
+5. 非零退出码返回 `ok=False`，但不抛异常。
+6. 工具超时时返回 `ok=False` 和超时说明。
+7. 限制单次命令超时不超过 `ToolContext.timeout_seconds`。
+8. 对输出按 `max_output_chars` 截断并标记截断状态。
+9. 编写成功命令、失败命令、超时、输出截断、工作目录验证测试。
 
-**验证：** 运行 `pytest tests/test_providers.py -k openai`，期望全部通过。
+**验证：** 运行 `pytest tests/test_tools_command.py`，期望全部通过。
 
-## T7: 实现 DeepSeek Provider
+## T5: 实现搜索工具
 
-**文件：** `src/mycode/providers/deepseek.py`, `tests/test_providers.py`
+**文件：** `src/mycode/tools/search.py`, `tests/test_tools_search.py`
+
+**依赖：** T1, T2
+
+**步骤：**
+
+1. 实现 `FindFilesTool`，参数为 `pattern`。
+2. 在工作区内按路径或文件名模式匹配文件。
+3. 跳过 `.git`、`.venv`、`__pycache__` 和常见缓存目录。
+4. 对返回文件数量和输出字符数做限制。
+5. 实现 `SearchCodeTool`，参数为 `query` 和可选 `regex`。
+6. 支持普通文本搜索和正则搜索。
+7. 返回匹配文件、行号和内容摘要。
+8. 跳过二进制文件和被排除目录。
+9. 对非法正则返回结构化失败。
+10. 编写模式找文件、排除目录、文本搜索、正则搜索、非法正则、输出限制测试。
+
+**验证：** 运行 `pytest tests/test_tools_search.py`，期望全部通过。
+
+## T6: 实现工具注册中心
+
+**文件：** `src/mycode/tools/registry.py`, `tests/test_tools_registry.py`
+
+**依赖：** T3, T4, T5
+
+**步骤：**
+
+1. 实现 `ToolRegistry.register()`。
+2. 实现 `ToolRegistry.get()`，未知工具返回清晰错误。
+3. 实现 `ToolRegistry.tool_specs()`。
+4. 实现 `ToolRegistry.as_openai_tools()`，输出 OpenAI-compatible tools 声明。
+5. 实现 `create_default_registry()`，登记六个核心工具。
+6. 防止重复工具名覆盖。
+7. 编写默认六工具登记、按名查找、未知工具、重复注册、OpenAI 声明格式测试。
+
+**验证：** 运行 `pytest tests/test_tools_registry.py`，期望全部通过。
+
+## T7: 实现工具执行器
+
+**文件：** `src/mycode/tools/executor.py`, `tests/test_tool_executor.py`
 
 **依赖：** T6
 
 **步骤：**
 
-1. 定义 `DeepSeekProvider` 复用 `OpenAIProvider` 的请求和解析逻辑。
-2. 保持独立类名，便于后续扩展 DeepSeek 专有参数。
-3. 测试 `protocol: deepseek` 时工厂返回 `DeepSeekProvider`。
-4. 测试 DeepSeek fake stream 能输出统一 `StreamEvent`。
+1. 实现 `ToolExecutor`，接收 `ToolRegistry` 和 `ToolContext`。
+2. 根据 `ToolCall.name` 查找工具并执行。
+3. 对未知工具返回 `ToolResult(ok=False)`。
+4. 对参数类型错误返回 `ToolResult(ok=False)`。
+5. 捕获工具运行中的未处理异常并包装为结构化失败。
+6. 对工具执行应用超时策略。
+7. 保证任何工具失败都不会抛到 CLI 或 Provider。
+8. 编写成功执行、未知工具、参数错误、工具异常、超时测试。
 
-**验证：** 运行 `pytest tests/test_providers.py -k deepseek`，期望全部通过。
+**验证：** 运行 `pytest tests/test_tool_executor.py`，期望全部通过。
 
-## T8: 实现 Anthropic Provider
+## T8: 扩展 Provider 接口
+
+**文件：** `src/mycode/providers/base.py`, `src/mycode/types.py`, `tests/test_providers.py`
+
+**依赖：** T1
+
+**步骤：**
+
+1. 修改 `LLMProvider.stream_chat()` 签名，增加 `tools` 参数。
+2. 保持默认 `tools=()`，让无工具调用路径继续兼容。
+3. 调整现有 fake provider 测试对象以接受 `tools` 参数。
+4. 验证现有普通文本测试仍能通过。
+
+**验证：** 运行 `pytest tests/test_session.py tests/test_providers.py -k factory`，期望全部通过。
+
+## T9: 扩展 OpenAI-compatible Provider
+
+**文件：** `src/mycode/providers/openai.py`, `src/mycode/providers/deepseek.py`, `tests/test_providers.py`
+
+**依赖：** T1, T6, T8
+
+**步骤：**
+
+1. 在请求体中加入由 `ToolSpec` 转换得到的 `tools`。
+2. 将包含 `tool_calls` 的 assistant 消息转换为 OpenAI Chat Completions 消息格式。
+3. 将 `tool` 消息转换为 OpenAI tool result 消息格式。
+4. 解析 `choices[0].delta.tool_calls` 中的工具调用 ID、名称和参数碎片。
+5. 输出 `tool_call_delta` 和 `tool_call_done` 事件。
+6. 保持 `[DONE]` 生成 `message_done`。
+7. 保证 DeepSeek 继续复用该行为。
+8. 编写工具声明入参、assistant tool_calls 消息转换、tool result 消息转换、参数碎片解析、DeepSeek 复用测试。
+
+**验证：** 运行 `pytest tests/test_providers.py -k "openai or deepseek"`，期望全部通过。
+
+## T10: 扩展 Anthropic Provider
 
 **文件：** `src/mycode/providers/anthropic.py`, `tests/test_providers.py`
 
-**依赖：** T2, T5
+**依赖：** T1, T6, T8
 
 **步骤：**
 
-1. 实现 `AnthropicProvider.__init__(config)`。
-2. 将通用 `Message` 转换为 Anthropic Messages API 格式。
-3. 使用 `httpx` 同步客户端发送 `{base_url}/v1/messages`。
-4. 请求 header 包含 `x-api-key`、`anthropic-version`、`content-type`。
-5. 请求体包含 `model`、`messages`、`max_tokens`、`stream: true`。
-6. 当 `thinking.enabled=True` 时加入 thinking 配置。
-7. 当 `thinking.enabled=False` 时不发送 thinking 配置。
-8. 解析 `content_block_delta` 中的 text delta 为 `text_delta`。
-9. 解析 `message_stop` 为 `message_done`。
-10. HTTP 状态错误、JSON 错误、流中断包装为 `ProviderError`。
-11. 编写文本增量、结束事件、thinking 开关和错误路径测试。
+1. 把通用 `ToolSpec` 转换为 Anthropic tools 格式。
+2. 将包含 `tool_calls` 的 assistant 消息转换为 Anthropic `tool_use` 内容块。
+3. 将 `tool` 消息转换为 Anthropic `tool_result` 内容块。
+4. 保持现有 thinking 配置行为。
+5. 解析 `content_block_start` 中的工具 ID 和工具名。
+6. 解析 `input_json_delta` 中的参数碎片。
+7. 在 `content_block_stop` 时输出 `tool_call_done`。
+8. 在 `message_stop` 时输出 `message_done`。
+9. 编写工具声明转换、工具消息转换、工具结果消息转换、参数碎片解析、thinking 回归测试。
 
 **验证：** 运行 `pytest tests/test_providers.py -k anthropic`，期望全部通过。
 
-## T9: 实现会话管理
+## T11: 实现工具调用参数拼接
 
-**文件：** `src/mycode/session.py`, `tests/test_session.py`
+**文件：** `src/mycode/session.py`, `tests/test_tool_streaming.py`
 
-**依赖：** T2, T4
+**依赖：** T1, T8, T9, T10
 
 **步骤：**
 
-1. 实现 `ChatSession` 保存 `list[Message]`。
-2. `send(user_text)` 先追加 user 消息。
-3. 调用 Provider `stream_chat()` 并透传 `StreamEvent`。
-4. 汇总所有 `text_delta` 为完整 assistant 回复。
-5. 收到 `message_done` 后追加 assistant 消息。
-6. Provider 抛错时不追加空 assistant 消息。
-7. 编写单轮、多轮、错误路径测试。
+1. 在会话层维护 `PendingToolCall` 集合。
+2. 收到 `tool_call_delta` 时按工具调用 ID 追加 JSON 参数碎片。
+3. 收到 `tool_call_done` 时解析完整 JSON。
+4. 参数合法时生成 `ToolCall`。
+5. 参数不是合法 JSON 时生成失败 `ToolResult`。
+6. 支持同一轮中多个工具调用的拼接和顺序保留，但本阶段只执行这一轮。
+7. 编写单工具碎片拼接、多工具拼接、非法 JSON 失败结果测试。
 
-**验证：** 运行 `pytest tests/test_session.py`，期望全部通过。
+**验证：** 运行 `pytest tests/test_tool_streaming.py`，期望全部通过。
 
-## T10: 实现 CLI 交互循环
+## T12: 实现会话单轮工具闭环
+
+**文件：** `src/mycode/session.py`, `tests/test_session_tools.py`, `tests/test_session.py`
+
+**依赖：** T7, T11
+
+**步骤：**
+
+1. 修改 `ChatSession.__init__()`，接收可选 `ToolRegistry` 和 `ToolContext`。
+2. 用户输入后第一轮 Provider 请求携带工具声明。
+3. 普通文本回复继续汇总并追加 assistant 消息。
+4. 出现工具调用时，汇总 assistant 的工具调用消息并追加历史。
+5. 对每个 `ToolCall` 发送 `tool_started` 事件。
+6. 通过 `ToolExecutor` 执行工具。
+7. 对每个结果发送 `tool_finished` 事件。
+8. 把工具结果序列化为 tool 消息追加历史。
+9. 发起一次后续 Provider 请求，生成最终文本回复。
+10. 后续 Provider 请求不携带工具声明，避免第二轮自动工具执行。
+11. 如果后续回复仍产生工具调用事件，本阶段不执行，并返回清晰停止边界。
+12. 编写普通聊天回归、工具成功回灌、工具失败回灌、未知工具、单轮停止边界测试。
+
+**验证：** 运行 `pytest tests/test_session.py tests/test_session_tools.py`，期望全部通过。
+
+## T13: 集成 CLI 工具状态展示
 
 **文件：** `src/mycode/cli.py`, `tests/test_cli.py`
 
-**依赖：** T3, T4, T9
+**依赖：** T12
 
 **步骤：**
 
-1. 实现 `main(argv=None)`。
-2. 支持 `--config`，默认值为 `config.yaml`。
-3. 加载配置并创建 Provider、ChatSession。
-4. 打印 myCode 启动提示和输入提示符。
-5. 循环读取用户输入。
-6. 支持退出命令，例如 `exit`、`quit`、`退出`。
-7. 对 `text_delta` 立即打印并 flush。
-8. 每轮结束后打印换行并回到提示符。
-9. 捕获 `ConfigError`，返回非 0 退出码。
-10. 捕获 `ProviderError`，显示错误并继续会话。
-11. 处理 Ctrl+C，正常退出。
-12. 编写参数解析、退出命令、配置错误、Provider 错误展示测试。
+1. CLI 启动时创建默认工具注册中心。
+2. CLI 启动时创建默认 `ToolContext`，工作区根目录为当前进程启动目录。
+3. 构造 `ChatSession` 时传入工具注册中心和工具上下文。
+4. 收到 `tool_started` 时打印工具开始提示。
+5. 收到 `tool_finished` 时打印成功或失败状态和简短消息。
+6. 保持文本增量流式打印。
+7. 保持配置错误、Provider 错误和退出命令行为。
+8. 编写工具开始展示、工具成功展示、工具失败展示、普通聊天回归测试。
 
 **验证：** 运行 `pytest tests/test_cli.py`，期望全部通过。
 
-## T11: 更新 Provider 工厂集成
+## T14: 更新文档说明
 
-**文件：** `src/mycode/providers/factory.py`, `tests/test_providers.py`
+**文件：** `README.md`
 
-**依赖：** T6, T7, T8
-
-**步骤：**
-
-1. 确保 `openai` 返回 `OpenAIProvider`。
-2. 确保 `anthropic` 返回 `AnthropicProvider`。
-3. 确保 `deepseek` 返回 `DeepSeekProvider`。
-4. 确保未知协议抛出 `ConfigError`。
-5. 补齐工厂测试。
-
-**验证：** 运行 `pytest tests/test_providers.py -k factory`，期望全部通过。
-
-## T12: 添加示例配置和 README
-
-**文件：** `config.example.yaml`, `README.md`
-
-**依赖：** T3, T10
+**依赖：** T13
 
 **步骤：**
 
-1. 编写 DeepSeek 示例配置，使用 `deepseek-v4-pro` 和 `${DEEPSEEK_API_KEY}`。
-2. 编写 OpenAI 示例配置。
-3. 编写 Anthropic 示例配置和 thinking 示例。
-4. README 说明安装、运行、配置、退出命令和安全注意事项。
-5. 明确示例不包含真实 API Key。
-6. 全文使用 `myCode` 作为展示名。
+1. 增加工具系统能力说明。
+2. 列出六个核心工具。
+3. 明确文件和命令默认限制在工作区内。
+4. 明确本阶段不是完整自动 Agent Loop。
+5. 补充工具系统测试命令。
 
-**验证：** 运行 `rg -n "Mew[C]ode|mew[c]ode|sk-" README.md config.example.yaml`，期望无匹配。
+**验证：** 阅读 `README.md`，确认没有暗示多轮自动工具循环已经实现。
 
-## T13: 运行完整自动化测试和命名扫描
+## T15: 全量回归和静态检查
 
-**文件：** 全项目
+**文件：** `src/mycode/**`, `tests/**`
 
-**依赖：** T1-T12
-
-**步骤：**
-
-1. 运行 `python -m compileall src`。
-2. 运行 `pytest`。
-3. 扫描错误项目名：`rg -n "Mew[C]ode|mew[c]ode"`。
-4. 扫描疑似真实密钥：`rg -n "sk-[A-Za-z0-9]"`。
-5. 修复发现的问题并重跑。
-
-**验证：** compile、pytest、命名扫描、密钥扫描均通过。
-
-## T14: tmux 端到端验证
-
-**文件：** `checklist.md` 生成后按其执行
-
-**依赖：** T13, checklist 审批通过
+**依赖：** T1-T14
 
 **步骤：**
 
-1. 在环境变量中设置 `DEEPSEEK_API_KEY`。
-2. 使用 DeepSeek 配置启动 tmux 会话运行 myCode。
-3. 输入第一轮真实问题，例如“用一句话介绍你自己”。
-4. 观察回复是否流式打印。
-5. 输入第二轮问题，例如“刚才我问了什么？”。
-6. 观察回复是否体现多轮上下文。
-7. 输入退出命令。
-8. 捕获 tmux 输出作为验收证据。
+1. 运行 Python 语法检查。
+2. 运行全部 pytest。
+3. 搜索旧项目名或错误项目名。
+4. 搜索明显真实 API Key 模式。
+5. 修复本阶段引入的失败。
 
-**验证：** 对照 `checklist.md` 逐项验收，全部通过。
+**验证：** 运行 `python -m compileall src` 和 `pytest`，期望全部通过；运行项目名和 API Key 搜索，确认无新增问题。
 
 ## 执行顺序
 
 ```text
-T1 → T2
-      ├─→ T3
-      ├─→ T4 → T11
-      ├─→ T5 → T6 → T7
-      │          └─→ T8
-      └─→ T9 → T10
-
-T12 → T13 → T14
+T1
+→ T2
+→ T3 → T4 → T5
+→ T6
+→ T7
+→ T8
+→ T9 → T10
+→ T11
+→ T12
+→ T13
+→ T14
+→ T15
 ```
-
-实际执行时，T3、T4、T5 可在 T2 后并行；T14 必须等 `checklist.md` 审批通过后执行。
