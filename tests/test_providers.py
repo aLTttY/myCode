@@ -9,7 +9,7 @@ from mycode.providers.anthropic import AnthropicProvider
 from mycode.providers.deepseek import DeepSeekProvider
 from mycode.providers.factory import create_provider
 from mycode.providers.openai import OpenAIProvider
-from mycode.types import AppConfig, ConfigError, Message, StreamEvent, ThinkingConfig, ToolCall, ToolSpec
+from mycode.types import AppConfig, ConfigError, Message, StreamEvent, ThinkingConfig, TokenUsage, ToolCall, ToolSpec
 
 
 def config(protocol: str) -> AppConfig:
@@ -107,6 +107,25 @@ def test_openai_provider_parses_tool_call_stream() -> None:
     assert events[2] == StreamEvent(type="tool_call_done", tool_call_id="1", tool_name="read_file")
 
 
+def test_openai_provider_parses_token_usage() -> None:
+    provider = OpenAIProvider(config("openai"))
+    response = FakeSseResponse([
+        "data: "
+        + json.dumps(
+            {
+                "choices": [],
+                "usage": {"prompt_tokens": 1, "completion_tokens": 2, "total_tokens": 3},
+            }
+        ),
+        "data: [DONE]",
+    ])
+
+    assert list(provider._iter_events(response)) == [
+        StreamEvent(type="token_usage", token_usage=TokenUsage(input_tokens=1, output_tokens=2, total_tokens=3)),
+        StreamEvent(type="message_done"),
+    ]
+
+
 def test_deepseek_provider_reuses_openai_stream_events() -> None:
     provider = DeepSeekProvider(config("deepseek"))
     response = FakeSseResponse([openai_line("DeepSeek"), "data: [DONE]"])
@@ -184,6 +203,19 @@ def test_anthropic_provider_parses_tool_call_stream() -> None:
     assert events[0] == StreamEvent(type="tool_call_delta", tool_call_id="1", tool_name="read_file")
     assert events[1].arguments_delta == '{"path": "a.txt"}'
     assert events[2] == StreamEvent(type="tool_call_done", tool_call_id="1", tool_name="read_file")
+
+
+def test_anthropic_provider_parses_token_usage() -> None:
+    provider = AnthropicProvider(config("anthropic"))
+    response = FakeSseResponse([
+        "data: " + json.dumps({"type": "message_delta", "usage": {"input_tokens": 4, "output_tokens": 5}}),
+        "data: " + json.dumps({"type": "message_stop"}),
+    ])
+
+    assert list(provider._iter_events(response)) == [
+        StreamEvent(type="token_usage", token_usage=TokenUsage(input_tokens=4, output_tokens=5, total_tokens=9)),
+        StreamEvent(type="message_done"),
+    ]
 
 
 def test_anthropic_provider_omits_thinking_when_disabled() -> None:

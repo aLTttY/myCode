@@ -7,9 +7,11 @@ from collections.abc import Sequence
 
 from prompt_toolkit import prompt
 
+from .agent.cancellation import CancellationToken
+from .agent.config import AgentRequest
+from .agent.runner import AgentRunner
 from .config import load_config
 from .providers.factory import create_provider
-from .session import ChatSession
 from .tools.registry import create_default_registry
 from .types import ConfigError, ProviderError, ToolContext
 
@@ -34,12 +36,12 @@ def main(argv: Sequence[str] | None = None) -> int:
         print(f"配置错误：{exc.user_message}", file=sys.stderr)
         return 1
 
-    session = ChatSession(
+    agent = AgentRunner(
         provider,
-        tool_registry=create_default_registry(),
+        full_registry=create_default_registry(),
         tool_context=ToolContext(workspace_root=Path.cwd()),
     )
-    print("myCode 已启动。输入 exit、quit 或 退出 结束。")
+    print("myCode 已启动。输入 /plan 生成计划，/do 执行计划，exit、quit 或 退出 结束。")
 
     while True:
         try:
@@ -59,21 +61,41 @@ def main(argv: Sequence[str] | None = None) -> int:
 
         try:
             assistant_started = False
-            for event in session.send(user_text):
+            cancellation = CancellationToken()
+            request = parse_agent_request(user_text)
+            for event in agent.run(request, cancellation):
                 if event.type == "text_delta":
                     if not assistant_started:
                         print("● ", end="", flush=True)
                         assistant_started = True
                     print(event.text, end="", flush=True)
-                elif event.type == "tool_started":
+                elif event.type == "progress":
+                    print(f"\n[agent] iteration {event.iteration}/{event.max_iterations}", flush=True)
+                elif event.type == "tool_call_started":
                     print(f"\n[tool] {event.tool_name} 开始", flush=True)
-                elif event.type == "tool_finished":
+                elif event.type == "tool_result":
                     result = event.tool_result
                     status = "成功" if result and result.ok else "失败"
                     message = result.message if result else ""
                     print(f"[tool] {event.tool_name} {status}：{message}", flush=True)
+                elif event.type == "done":
+                    if event.stop_reason and event.stop_reason != "completed":
+                        print(f"\n[agent] 停止：{event.message}", flush=True)
+                elif event.type == "error":
+                    print(f"\n[agent] 错误：{event.message}", file=sys.stderr, flush=True)
             print()
+        except KeyboardInterrupt:
+            cancellation.cancel()
+            print("\n已取消。")
         except ProviderError as exc:
             print(f"请求错误：{exc.user_message}", file=sys.stderr)
 
     return 0
+
+
+def parse_agent_request(user_text: str) -> AgentRequest:
+    if user_text.startswith("/plan"):
+        return AgentRequest(text=user_text.removeprefix("/plan").strip(), mode="plan")
+    if user_text.startswith("/do"):
+        return AgentRequest(text=user_text.removeprefix("/do").strip(), mode="do")
+    return AgentRequest(text=user_text, mode="default")

@@ -1,6 +1,6 @@
 # myCode
 
-myCode 是一个命令行 AI 编程助手。当前版本支持简单交互式多轮对话，并提供基础工具系统，让模型可以在单轮对话中请求读取文件、写入文件、修改文件、执行命令和搜索代码。
+myCode 是一个命令行 AI 编程助手。当前版本支持交互式多轮对话、基础工具系统和 Agent Loop，让模型可以围绕一次用户任务反复调用工具、观察结果并继续推进，直到任务完成或触发停止条件。
 
 ## 安装依赖
 
@@ -67,7 +67,12 @@ PYTHONPATH=src .venv/bin/python -m mycode
 PYTHONPATH=src .venv/bin/python -m mycode --config config.yaml
 ```
 
-进入交互界面后输入问题，myCode 会流式打印模型回复。输入 `exit`、`quit` 或 `退出` 结束会话。
+进入交互界面后输入问题，myCode 会流式打印模型回复，并在需要时自动执行工具调用。输入 `exit`、`quit` 或 `退出` 结束会话。
+
+支持两个模式前缀：
+
+- `/plan <任务>`：Plan Mode，只开放 `read_file`、`find_files`、`search_code` 这类只读工具，让模型先观察项目并输出计划。
+- `/do <任务>`：Do Mode，开放完整工具集，用于根据任务或已有计划执行实际改动。
 
 ## 工具系统
 
@@ -82,7 +87,17 @@ myCode 当前提供六个核心工具：
 
 文件和命令工具默认限制在启动 myCode 时的当前工作区内。越界路径、命令失败、超时和参数错误会作为结构化工具结果返回给模型，而不是让 myCode 崩溃。
 
-当前工具系统只实现“一次工具调用结果回灌”：一次用户输入最多触发一轮工具执行，然后模型基于工具结果生成最终回复。本阶段不实现多工具连续自动循环，也不是完整 Agent Loop。
+## Agent Loop
+
+Agent Loop 使用 ReAct 风格循环工作：每一轮请求模型、流式收集文本和工具调用、执行工具、把工具结果回写进对话历史，再进入下一轮判断。循环会在以下情况停止：
+
+- 模型不再请求工具并给出最终回复。
+- 达到最大迭代次数。
+- 用户取消当前任务。
+- 连续请求未知工具超过阈值。
+- 模型流式响应出错，或工具调用参数无法解析。
+
+一次模型响应里出现多个工具调用时，myCode 会按安全性分批：只读工具可以并发执行，写文件、改文件、执行命令等有副作用工具串行执行。本阶段仍不包含权限系统、上下文压缩和用户交互式确认。
 
 ## 测试
 
@@ -94,4 +109,10 @@ PYTHONPATH=src .venv/bin/python -m pytest
 
 ```bash
 PYTHONPATH=src .venv/bin/python -m pytest tests/test_tools_files.py tests/test_tools_command.py tests/test_tools_search.py tests/test_session_tools.py
+```
+
+Agent Loop 相关测试可以单独运行：
+
+```bash
+PYTHONPATH=src .venv/bin/python -m pytest tests/test_agent_collector.py tests/test_agent_executor.py tests/test_agent_runner.py tests/test_agent_tools.py
 ```

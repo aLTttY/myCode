@@ -37,12 +37,21 @@ class StreamEvent:
         "tool_call_done",
         "tool_started",
         "tool_finished",
+        "token_usage",
     ]
     text: str = ""
     tool_call_id: str = ""
     tool_name: str = ""
     arguments_delta: str = ""
     tool_result: ToolResult | None = None
+    token_usage: TokenUsage | None = None
+
+
+@dataclass(frozen=True)
+class TokenUsage:
+    input_tokens: int | None = None
+    output_tokens: int | None = None
+    total_tokens: int | None = None
 
 
 @dataclass(frozen=True)

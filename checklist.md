@@ -1,99 +1,91 @@
-# myCode 工具系统 Checklist
+# myCode Agent Loop Checklist
 
 > 每一项通过运行代码或观察行为来验证，聚焦系统行为。
 
 ## 实现完整性
 
-- [ ] 工具系统中每个工具都暴露名称、描述、参数 Schema 和执行行为。（验证：运行 `pytest tests/test_tools_registry.py`，检查默认工具声明）
-- [ ] `read_file` 能读取工作区内文件内容，并返回路径、大小和内容。（验证：运行 `pytest tests/test_tools_files.py -k read`）
-- [ ] `read_file` 对越界路径返回结构化失败，不读取工作区外文件。（验证：运行 `pytest tests/test_tools_files.py -k outside`）
-- [ ] `write_file` 能向工作区内目标文件写入完整内容。（验证：运行 `pytest tests/test_tools_files.py -k write`）
-- [ ] `write_file` 对越界路径返回结构化失败，不写入工作区外文件。（验证：运行 `pytest tests/test_tools_files.py -k outside`）
-- [ ] `edit_file` 在 `old_text` 唯一匹配时完成替换并返回成功结果。（验证：运行 `pytest tests/test_tools_files.py -k edit`）
-- [ ] `edit_file` 在 `old_text` 匹配 0 次或多次时不修改文件，并返回明确失败原因。（验证：运行 `pytest tests/test_tools_files.py -k match`）
-- [ ] `run_command` 能在工作区内执行命令并返回退出码、stdout、stderr。（验证：运行 `pytest tests/test_tools_command.py -k success`）
-- [ ] `run_command` 对非零退出码返回结构化失败，不导致 myCode 崩溃。（验证：运行 `pytest tests/test_tools_command.py -k failure`）
-- [ ] `run_command` 超时时返回结构化超时失败结果。（验证：运行 `pytest tests/test_tools_command.py -k timeout`）
-- [ ] `find_files` 能按模式返回匹配文件列表，并跳过排除目录。（验证：运行 `pytest tests/test_tools_search.py -k find`）
-- [ ] `search_code` 能返回匹配文件、行号和内容摘要。（验证：运行 `pytest tests/test_tools_search.py -k search`）
-- [ ] `search_code` 对非法正则返回结构化失败。（验证：运行 `pytest tests/test_tools_search.py -k regex`）
-- [ ] 工具结果按最大输出长度截断，避免大输出污染上下文。（验证：运行 `pytest tests/test_tools_command.py tests/test_tools_search.py -k truncate`）
+- [ ] Agent 能在一次用户请求中执行多轮“模型响应 → 工具执行 → 结果回写 → 再次模型响应”。（验证：运行 `pytest tests/test_agent_runner.py -k completed`）
+- [ ] 模型不再请求工具时，Agent 正常停止并输出最终文本。（验证：运行 `pytest tests/test_agent_runner.py -k completed`）
+- [ ] 达到最大迭代次数时，Agent 停止并产生 `max_iterations` 停止原因。（验证：运行 `pytest tests/test_agent_runner.py -k max_iterations`）
+- [ ] 用户取消时，Agent 停止后不再继续调用模型或工具，并产生 `cancelled` 事件。（验证：运行 `pytest tests/test_agent_runner.py tests/test_agent_executor.py -k cancelled`）
+- [ ] 连续未知工具调用达到阈值时，Agent 停止并说明未知工具。（验证：运行 `pytest tests/test_agent_runner.py -k unknown_tools`）
+- [ ] Provider 流式错误会停止 Agent 并产生 `stream_error`。（验证：运行 `pytest tests/test_agent_runner.py -k stream_error`）
+- [ ] 工具调用参数解析错误会停止 Agent 或回写结构化错误，并产生 `tool_parse_error`。（验证：运行 `pytest tests/test_agent_runner.py tests/test_agent_collector.py -k "tool_parse_error or invalid"`）
 
-## 注册与执行
+## 事件流
 
-- [ ] 默认注册中心登记六个核心工具。（验证：运行 `pytest tests/test_tools_registry.py -k default`）
-- [ ] 注册中心能按名称查找工具，未知工具返回清晰错误。（验证：运行 `pytest tests/test_tools_registry.py -k lookup`）
-- [ ] 注册中心能生成 OpenAI-compatible 工具声明列表。（验证：运行 `pytest tests/test_tools_registry.py -k openai`）
-- [ ] 工具执行器能执行已注册工具并返回 `ToolResult`。（验证：运行 `pytest tests/test_tool_executor.py -k success`）
-- [ ] 工具执行器能把未知工具、参数错误、工具异常包装成结构化失败。（验证：运行 `pytest tests/test_tool_executor.py -k "unknown or argument or exception"`）
-- [ ] 工具执行器超时时返回结构化失败，不让会话永久阻塞。（验证：运行 `pytest tests/test_tool_executor.py -k timeout`）
+- [ ] Agent 对外输出统一 `AgentEvent`，CLI 不直接消费 Provider `StreamEvent`。（验证：运行 `pytest tests/test_cli.py tests/test_agent_runner.py`，并 review CLI 只处理 `AgentEvent`）
+- [ ] 文本增量能实时作为 `text_delta` 事件发出。（验证：运行 `pytest tests/test_agent_collector.py -k text`）
+- [ ] StreamCollector 同时累计完整 assistant 文本用于循环判断。（验证：运行 `pytest tests/test_agent_collector.py -k collected`）
+- [ ] 工具调用开始事件包含工具名和 tool call id。（验证：运行 `pytest tests/test_agent_executor.py -k started`）
+- [ ] 工具结果事件包含工具结果和 tool call id。（验证：运行 `pytest tests/test_agent_executor.py -k result`）
+- [ ] Token 用量事件可从 Provider 事件转发到 Agent 事件；无用量时允许缺省。（验证：运行 `pytest tests/test_providers.py tests/test_agent_collector.py -k usage`）
+- [ ] 每轮循环都会产生进度事件，包含当前迭代和最大迭代。（验证：运行 `pytest tests/test_agent_runner.py -k progress`）
+- [ ] done/error 事件包含结构化停止原因。（验证：运行 `pytest tests/test_agent_runner.py -k stop_reason`）
 
-## Provider 集成
+## 多工具执行
 
-- [ ] Provider 接口支持传入工具声明，普通文本路径保持兼容。（验证：运行 `pytest tests/test_session.py tests/test_providers.py -k factory`）
-- [ ] OpenAI Provider 请求体包含工具声明时格式正确。（验证：运行 `pytest tests/test_providers.py -k "openai and tools"`）
-- [ ] OpenAI Provider 能转换 assistant tool_calls 和 tool result 消息。（验证：运行 `pytest tests/test_providers.py -k "openai and message"`）
-- [ ] OpenAI Provider 能从流式响应中解析工具调用名称和 JSON 参数碎片。（验证：运行 `pytest tests/test_providers.py -k "openai and tool_call"`）
-- [ ] DeepSeek Provider 复用 OpenAI-compatible 工具声明和流式解析行为。（验证：运行 `pytest tests/test_providers.py -k deepseek`）
-- [ ] Anthropic Provider 能把通用工具声明转换为 Anthropic tools 格式。（验证：运行 `pytest tests/test_providers.py -k "anthropic and tools"`）
-- [ ] Anthropic Provider 能转换 tool_use 和 tool_result 消息。（验证：运行 `pytest tests/test_providers.py -k "anthropic and message"`）
-- [ ] Anthropic Provider 能从流式响应中解析工具调用参数碎片和结束事件。（验证：运行 `pytest tests/test_providers.py -k "anthropic and tool_call"`）
-- [ ] Claude thinking 配置在工具系统加入后仍按原逻辑启用或省略。（验证：运行 `pytest tests/test_providers.py -k thinking`）
+- [ ] Agent 能识别一次模型响应中的多个工具调用。（验证：运行 `pytest tests/test_agent_collector.py -k multiple`）
+- [ ] `read_file`、`find_files`、`search_code` 被分类为读类工具。（验证：运行 `pytest tests/test_agent_tools.py -k classify`）
+- [ ] `write_file`、`edit_file`、`run_command` 被分类为有副作用工具。（验证：运行 `pytest tests/test_agent_tools.py -k classify`）
+- [ ] 多个读类工具调用可以并发执行，并正确回写每个结果。（验证：运行 `pytest tests/test_agent_executor.py -k concurrent`）
+- [ ] 多个有副作用工具调用按原顺序串行执行。（验证：运行 `pytest tests/test_agent_executor.py -k serial`）
+- [ ] 混合工具调用会按安全性分批，读类和副作用批次不会无序交叉。（验证：运行 `pytest tests/test_agent_tools.py tests/test_agent_executor.py -k batch`）
+- [ ] 工具结果按对应 tool call id 写入历史，下一轮模型能看到全部结果。（验证：运行 `pytest tests/test_agent_runner.py -k history`）
 
-## 会话编排
+## Plan 与 Do Mode
 
-- [ ] 会话层能拼接单个工具调用的 JSON 参数碎片并解析为完整参数。（验证：运行 `pytest tests/test_tool_streaming.py -k single`）
-- [ ] 会话层能在同一轮中保留多个工具调用的拼接顺序。（验证：运行 `pytest tests/test_tool_streaming.py -k multiple`）
-- [ ] 非法 JSON 参数会被包装成结构化工具失败结果。（验证：运行 `pytest tests/test_tool_streaming.py -k invalid`）
-- [ ] 工具调用成功后，assistant tool_calls 和 tool result 会追加到对话历史。（验证：运行 `pytest tests/test_session_tools.py -k success`）
-- [ ] 工具调用失败后，失败结果会作为 tool 消息回灌给模型。（验证：运行 `pytest tests/test_session_tools.py -k failure`）
-- [ ] 工具结果回灌后会触发一次后续模型请求生成最终回复。（验证：运行 `pytest tests/test_session_tools.py -k followup`）
-- [ ] 一次用户输入最多执行一轮工具调用；后续模型再次请求工具时不会继续执行。（验证：运行 `pytest tests/test_session_tools.py -k stop`）
-- [ ] 无工具调用的普通聊天仍保持现有流式文本输出和多轮历史能力。（验证：运行 `pytest tests/test_session.py tests/test_session_tools.py -k plain`）
+- [ ] `/plan` 被解析为 `AgentRequest(mode="plan")`。（验证：运行 `pytest tests/test_cli.py -k plan`）
+- [ ] `/plan` 模式只开放 `read_file`、`find_files`、`search_code`。（验证：运行 `pytest tests/test_agent_tools.py tests/test_agent_runner.py -k plan`）
+- [ ] `/plan` 模式下写文件、改文件、执行命令不会被开放给模型。（验证：运行 `pytest tests/test_agent_runner.py -k plan`）
+- [ ] `/plan` 模式能基于读类工具结果输出计划文本。（验证：运行 `pytest tests/test_agent_runner.py -k plan`）
+- [ ] `/do` 被解析为 `AgentRequest(mode="do")`。（验证：运行 `pytest tests/test_cli.py -k do`）
+- [ ] `/do` 模式使用完整工具集合，可执行副作用工具。（验证：运行 `pytest tests/test_agent_runner.py -k do`）
+- [ ] 普通输入默认进入完整 Agent Loop。（验证：运行 `pytest tests/test_cli.py tests/test_agent_runner.py -k default`）
 
 ## CLI 行为
 
-- [ ] CLI 启动时创建默认工具注册中心和工作区工具上下文。（验证：运行 `pytest tests/test_cli.py -k tool_context`）
-- [ ] CLI 收到 `tool_started` 事件时显示工具开始提示。（验证：运行 `pytest tests/test_cli.py -k tool_started`）
-- [ ] CLI 收到成功 `tool_finished` 事件时显示工具成功状态。（验证：运行 `pytest tests/test_cli.py -k tool_success`）
-- [ ] CLI 收到失败 `tool_finished` 事件时显示工具失败原因。（验证：运行 `pytest tests/test_cli.py -k tool_failure`）
-- [ ] CLI 普通聊天流式文本输出、配置错误、Provider 错误和退出命令保持可用。（验证：运行 `pytest tests/test_cli.py`）
+- [ ] CLI 创建 `AgentRunner` 而不是直接驱动 `ChatSession` 工具闭环。（验证：运行 `pytest tests/test_cli.py`，并 review CLI 构造路径）
+- [ ] CLI 能展示文本增量事件。（验证：运行 `pytest tests/test_cli.py -k streaming`）
+- [ ] CLI 能展示迭代进度事件。（验证：运行 `pytest tests/test_cli.py -k progress`）
+- [ ] CLI 能展示工具开始和工具结果事件。（验证：运行 `pytest tests/test_cli.py -k tool`）
+- [ ] CLI 能展示完成、迭代上限、取消、未知工具和流错误等停止原因。（验证：运行 `pytest tests/test_cli.py -k stop`）
+- [ ] CLI 退出命令、配置错误和 Provider 错误展示保持可用。（验证：运行 `pytest tests/test_cli.py`）
 
-## 安全与边界
+## 回归与边界
 
-- [ ] 文件类工具拒绝绝对路径和 `..` 越界路径。（验证：运行 `pytest tests/test_tools_files.py -k outside`）
-- [ ] 文件类工具拒绝符号链接解析后的工作区外路径。（验证：运行 `pytest tests/test_tools_files.py -k symlink`）
-- [ ] 命令工具始终以 `workspace_root` 为工作目录运行。（验证：运行 `pytest tests/test_tools_command.py -k cwd`）
-- [ ] 搜索工具跳过 `.git`、`.venv`、`__pycache__` 和二进制文件。（验证：运行 `pytest tests/test_tools_search.py -k skip`）
-- [ ] README 明确本阶段不是完整自动 Agent Loop。（验证：阅读 `README.md`，确认存在单轮边界说明）
+- [ ] 现有 Provider 文本流和工具调用解析保持可用。（验证：运行 `pytest tests/test_providers.py`）
+- [ ] 现有工具系统测试保持通过。（验证：运行 `pytest tests/test_tools_files.py tests/test_tools_command.py tests/test_tools_search.py tests/test_tools_registry.py tests/test_tool_executor.py`）
+- [ ] 旧 Session 测试保持通过，兼容层语义明确。（验证：运行 `pytest tests/test_session.py tests/test_session_tools.py`）
+- [ ] 没有工具调用的普通聊天仍保持流式输出。（验证：运行 `pytest tests/test_agent_runner.py tests/test_cli.py -k plain`）
+- [ ] README 明确本阶段仍不做权限系统、上下文压缩、交互式确认和复杂 TUI。（验证：阅读 `README.md`）
 
 ## 编译与测试
 
-- [ ] Python 源码语法检查通过。（验证：运行 `python -m compileall src`）
-- [ ] 文件工具测试通过。（验证：运行 `pytest tests/test_tools_files.py`）
-- [ ] 命令工具测试通过。（验证：运行 `pytest tests/test_tools_command.py`）
-- [ ] 搜索工具测试通过。（验证：运行 `pytest tests/test_tools_search.py`）
-- [ ] 注册中心测试通过。（验证：运行 `pytest tests/test_tools_registry.py`）
-- [ ] 工具执行器测试通过。（验证：运行 `pytest tests/test_tool_executor.py`）
-- [ ] 流式工具参数拼接测试通过。（验证：运行 `pytest tests/test_tool_streaming.py`）
-- [ ] 会话工具闭环测试通过。（验证：运行 `pytest tests/test_session_tools.py`）
-- [ ] Provider 测试通过。（验证：运行 `pytest tests/test_providers.py`）
+- [ ] Python 源码语法检查通过。（验证：运行 `PYTHONPYCACHEPREFIX=.pycache .venv/bin/python -m compileall src tests`）
+- [ ] Agent collector 测试通过。（验证：运行 `pytest tests/test_agent_collector.py`）
+- [ ] Agent tools 测试通过。（验证：运行 `pytest tests/test_agent_tools.py`）
+- [ ] Agent executor 测试通过。（验证：运行 `pytest tests/test_agent_executor.py`）
+- [ ] Agent runner 测试通过。（验证：运行 `pytest tests/test_agent_runner.py`）
 - [ ] CLI 测试通过。（验证：运行 `pytest tests/test_cli.py`）
-- [ ] 全量自动化测试通过。（验证：运行 `pytest`）
+- [ ] Provider 测试通过。（验证：运行 `pytest tests/test_providers.py`）
+- [ ] 全量自动化测试通过。（验证：运行 `PYTHONPYCACHEPREFIX=.pycache .venv/bin/python -m pytest`）
 - [ ] 项目中没有新增错误项目名。（验证：运行 `rg -n "Mew[C]ode|mew[c]ode"`，人工确认只在历史说明或允许位置出现）
 - [ ] 项目中没有提交真实 API Key。（验证：运行 `rg -n "sk-[A-Za-z0-9]"`，期望无匹配）
 
 ## 端到端场景
 
-- [ ] 场景 1：模型请求读取文件，myCode 执行 `read_file` 后回灌结果并输出最终回复。（验证：用 fake Provider 或集成测试模拟工具调用，观察工具状态和最终文本）
-- [ ] 场景 2：模型请求修改文件，`old_text` 唯一匹配时文件被替换，终端显示工具成功。（验证：用临时工作区运行会话集成测试，检查文件内容）
-- [ ] 场景 3：模型请求修改文件但 `old_text` 不存在，文件不变，模型收到失败结果并生成解释。（验证：用临时工作区运行会话集成测试，检查文件内容和失败消息）
-- [ ] 场景 4：模型请求执行失败命令，myCode 不崩溃，工具结果包含退出码和 stderr，最终回复能说明失败。（验证：用 fake Provider 或 CLI 测试模拟 `run_command` 失败）
-- [ ] 场景 5：模型在工具结果回灌后再次请求工具，myCode 不执行第二轮工具调用。（验证：运行 `pytest tests/test_session_tools.py -k stop`，检查执行次数为 1）
-- [ ] 场景 6：没有工具调用的普通多轮聊天仍可用。（验证：运行现有 session 和 CLI 普通聊天测试）
+- [ ] 场景 1：普通输入触发两轮工具调用后完成。（验证：用 fake Provider 运行 AgentRunner，观察两轮 progress、工具结果、最终 done）
+- [ ] 场景 2：模型持续请求工具直到达到迭代上限。（验证：用 fake Provider 运行 AgentRunner，观察 `max_iterations` 停止原因）
+- [ ] 场景 3：用户取消正在运行的 Agent。（验证：触发 CancellationToken，观察 `cancelled` 停止原因且后续工具不再执行）
+- [ ] 场景 4：一次模型响应返回多个读类工具调用。（验证：运行并发批次测试，观察每个结果按 tool call id 回写）
+- [ ] 场景 5：一次模型响应返回多个副作用工具调用。（验证：运行串行批次测试，观察执行顺序与模型请求顺序一致）
+- [ ] 场景 6：`/plan` 查看项目并输出计划，不产生文件修改或命令执行。（验证：用 fake Provider 检查可用工具集合只有读类工具）
+- [ ] 场景 7：`/do` 使用完整工具集合执行实际修改或命令。（验证：用 fake Provider 检查副作用工具可用并能执行）
+- [ ] 场景 8：没有工具调用的普通聊天直接流式输出最终回复。（验证：运行 plain chat 测试）
 
 ## 验收记录要求
 
 - [ ] 每个 checklist 条目执行后记录实际结果，不用“应该可以”代替证据。
-- [ ] 若任一测试失败，先定位是否属于本阶段变更，再修复并重跑相关验证。
+- [ ] 若任一测试失败，先判断是否属于本阶段变更，再修复并重跑相关验证。
 - [ ] 最终验收报告需要列出通过项数量、失败项、修复动作和关键命令输出。

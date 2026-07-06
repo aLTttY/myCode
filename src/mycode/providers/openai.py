@@ -6,7 +6,7 @@ from collections.abc import Iterator, Sequence
 import httpx
 
 from mycode.providers.sse import iter_sse_data_lines
-from mycode.types import AppConfig, Message, ProviderError, StreamEvent, ToolCall, ToolSpec
+from mycode.types import AppConfig, Message, ProviderError, StreamEvent, TokenUsage, ToolCall, ToolSpec
 
 
 class OpenAIProvider:
@@ -66,7 +66,12 @@ class OpenAIProvider:
             except json.JSONDecodeError as exc:
                 raise ProviderError("模型 API 返回了无法解析的流式数据。") from exc
 
-            choice = event.get("choices", [{}])[0]
+            choices = event.get("choices") or [{}]
+            choice = choices[0]
+            usage = event.get("usage")
+            if isinstance(usage, dict):
+                yield StreamEvent(type="token_usage", token_usage=_token_usage(usage))
+
             delta = choice.get("delta", {})
             text_delta = delta.get("content")
             if text_delta:
@@ -126,3 +131,14 @@ def _openai_tool_call(call: ToolCall) -> dict[str, object]:
             "arguments": json.dumps(call.arguments, ensure_ascii=False),
         },
     }
+
+
+def _token_usage(usage: dict[str, object]) -> TokenUsage:
+    input_tokens = usage.get("prompt_tokens")
+    output_tokens = usage.get("completion_tokens")
+    total_tokens = usage.get("total_tokens")
+    return TokenUsage(
+        input_tokens=input_tokens if isinstance(input_tokens, int) else None,
+        output_tokens=output_tokens if isinstance(output_tokens, int) else None,
+        total_tokens=total_tokens if isinstance(total_tokens, int) else None,
+    )

@@ -1,330 +1,307 @@
-# myCode 工具系统 Tasks
+# myCode Agent Loop Tasks
 
 ## 文件清单
 
 | 操作 | 文件 | 职责 |
 |------|------|------|
-| 已有 | `spec.md` | 已批准工具系统需求文档 |
-| 已有 | `plan.md` | 已批准工具系统技术设计文档 |
-| 修改 | `src/mycode/types.py` | 扩展消息、流式事件、工具调用和工具结果类型 |
-| 修改 | `src/mycode/providers/base.py` | 扩展 Provider 接口以接收工具声明 |
-| 修改 | `src/mycode/providers/openai.py` | 支持 OpenAI-compatible 工具声明、工具调用流式解析和工具消息格式 |
-| 修改 | `src/mycode/providers/deepseek.py` | 继续复用 OpenAI-compatible 工具能力 |
-| 修改 | `src/mycode/providers/anthropic.py` | 支持 Anthropic 工具声明、工具调用流式解析和工具结果消息格式 |
-| 修改 | `src/mycode/session.py` | 编排单轮工具调用、工具执行和一次结果回灌 |
-| 修改 | `src/mycode/cli.py` | 初始化工具系统并展示工具执行状态 |
-| 新建 | `src/mycode/tools/__init__.py` | 工具包导出 |
-| 新建 | `src/mycode/tools/base.py` | Tool 接口、参数校验、路径安全工具 |
-| 新建 | `src/mycode/tools/registry.py` | 工具注册中心和默认工具集合 |
-| 新建 | `src/mycode/tools/executor.py` | 工具执行器、错误包装和超时处理 |
-| 新建 | `src/mycode/tools/files.py` | 读文件、写文件、原文唯一替换工具 |
-| 新建 | `src/mycode/tools/command.py` | 执行命令工具 |
-| 新建 | `src/mycode/tools/search.py` | 按模式找文件和搜索代码内容工具 |
-| 修改 | `README.md` | 说明工具系统能力和非 Agent Loop 边界 |
-| 修改 | `tests/test_providers.py` | 扩展 Provider 工具声明、消息转换和工具事件解析测试 |
-| 修改 | `tests/test_cli.py` | 扩展 CLI 工具状态展示测试 |
-| 新建 | `tests/test_tools_files.py` | 文件工具测试 |
-| 新建 | `tests/test_tools_command.py` | 命令工具测试 |
-| 新建 | `tests/test_tools_search.py` | 搜索工具测试 |
-| 新建 | `tests/test_tools_registry.py` | 注册中心测试 |
-| 新建 | `tests/test_tool_executor.py` | 工具执行器错误和超时测试 |
-| 新建 | `tests/test_tool_streaming.py` | JSON 参数碎片拼接测试 |
-| 新建 | `tests/test_session_tools.py` | 工具结果回灌和单轮停止测试 |
+| 已有 | `spec.md` | 已批准 Agent Loop 需求文档 |
+| 已有 | `plan.md` | 已批准 Agent Loop 技术设计文档 |
+| 修改 | `src/mycode/types.py` | 扩展 Provider 事件以承载 Token 用量 |
+| 修改 | `src/mycode/providers/openai.py` | 解析 OpenAI-compatible token usage 事件 |
+| 修改 | `src/mycode/providers/deepseek.py` | 继续复用 OpenAI-compatible 行为 |
+| 修改 | `src/mycode/providers/anthropic.py` | 解析 Anthropic token usage 事件 |
+| 修改 | `src/mycode/cli.py` | 改为创建 AgentRunner、解析 `/plan` 和 `/do`、消费 AgentEvent |
+| 修改 | `src/mycode/session.py` | 保留兼容层，避免继续承载 Agent Loop 主逻辑 |
+| 修改 | `README.md` | 说明 Agent Loop、停止条件、Plan Mode 和范围边界 |
+| 新建 | `src/mycode/agent/__init__.py` | Agent 包导出 |
+| 新建 | `src/mycode/agent/config.py` | AgentConfig、AgentRequest、AgentMode |
+| 新建 | `src/mycode/agent/events.py` | AgentEvent、TokenUsage、停止原因和事件构造 |
+| 新建 | `src/mycode/agent/cancellation.py` | CancellationToken |
+| 新建 | `src/mycode/agent/collector.py` | StreamCollector 双路流式收集 |
+| 新建 | `src/mycode/agent/tools.py` | 工具安全分类、只读注册中心和批处理 |
+| 新建 | `src/mycode/agent/executor.py` | BatchToolExecutor，并发读批次、串行副作用批次 |
+| 新建 | `src/mycode/agent/runner.py` | AgentRunner ReAct 循环和停止条件 |
+| 新建 | `tests/test_agent_collector.py` | 流式双路收集测试 |
+| 新建 | `tests/test_agent_tools.py` | 工具分类、只读注册中心、批处理测试 |
+| 新建 | `tests/test_agent_executor.py` | 批次执行、并发/串行、取消测试 |
+| 新建 | `tests/test_agent_runner.py` | 正常完成、迭代上限、未知工具、流错误测试 |
+| 修改 | `tests/test_cli.py` | `/plan`、`/do`、AgentEvent 展示和取消回归测试 |
+| 修改 | `tests/test_providers.py` | Token 用量事件解析测试 |
+| 修改 | `tests/test_session.py` | 兼容层回归测试 |
 
-## T1: 扩展共享类型
+## T1: 扩展基础事件类型
 
-**文件：** `src/mycode/types.py`
+**文件：** `src/mycode/types.py`, `tests/test_providers.py`
 
 **依赖：** 已批准 `spec.md`、`plan.md`
 
 **步骤：**
 
-1. 增加 `ToolSpec`、`ToolContext`、`ToolResult`、`ToolCall`、`PendingToolCall`。
-2. 扩展 `Message.role`，支持 `tool` 消息。
-3. 为 `Message` 增加 `tool_calls` 和 `tool_call_id` 字段。
-4. 扩展 `StreamEvent.type`，支持 `tool_call_delta`、`tool_call_done`、`tool_started`、`tool_finished`。
-5. 为 `StreamEvent` 增加工具调用 ID、工具名、参数增量和工具结果字段。
-6. 增加 `ToolError`，用于工具系统内部错误表达。
-7. 保持现有文本聊天字段向后兼容。
+1. 新增 `TokenUsage` 数据结构，字段允许为空。
+2. 扩展 `StreamEvent.type`，支持 `token_usage`。
+3. 为 `StreamEvent` 增加 `token_usage` 字段。
+4. 保持现有 `text_delta`、`tool_call_delta`、`tool_call_done`、`message_done` 行为兼容。
+5. 更新测试中的 `StreamEvent` 构造断言。
 
-**验证：** 运行 `python -m compileall src/mycode/types.py`，期望无语法错误。
+**验证：** 运行 `pytest tests/test_providers.py tests/test_session.py`，期望已有测试通过。
 
-## T2: 实现工具基础设施
+## T2: 增加 Agent 配置和事件模型
 
-**文件：** `src/mycode/tools/__init__.py`, `src/mycode/tools/base.py`
+**文件：** `src/mycode/agent/__init__.py`, `src/mycode/agent/config.py`, `src/mycode/agent/events.py`, `tests/test_agent_runner.py`
 
 **依赖：** T1
 
 **步骤：**
 
-1. 定义 `Tool` Protocol，包含 `spec` 和 `run()`。
-2. 实现必填字符串参数读取辅助函数。
-3. 实现可选布尔值、整数值、浮点数参数读取辅助函数。
-4. 实现 `resolve_workspace_path()`，把相对路径解析到 `workspace_root` 下。
-5. 对绝对路径、`..` 越界路径和符号链接解析后的越界路径返回 `ToolError`。
-6. 实现工具结果输出截断辅助函数。
-7. 在 `__init__.py` 中导出基础类型和工具类入口。
+1. 定义 `AgentMode`，支持 `default`、`plan`、`do`。
+2. 定义 `AgentConfig`，包含 `max_iterations` 和 `max_unknown_tool_calls`。
+3. 定义 `AgentRequest`。
+4. 定义 `AgentStopReason`。
+5. 定义 `AgentEvent`，支持文本、工具开始、工具结果、token usage、进度、done、error。
+6. 提供 `progress_event()` 和 `done_event()` 辅助构造函数。
+7. 在 `__init__.py` 中导出核心 Agent 类型。
 
-**验证：** 运行 `python -m compileall src/mycode/tools`，期望无语法错误。
+**验证：** 运行 `.venv/bin/python -m compileall src/mycode/agent`，期望无语法错误。
 
-## T3: 实现文件工具
+## T3: 实现取消信号
 
-**文件：** `src/mycode/tools/files.py`, `tests/test_tools_files.py`
+**文件：** `src/mycode/agent/cancellation.py`, `tests/test_agent_executor.py`, `tests/test_agent_runner.py`
+
+**依赖：** T2
+
+**步骤：**
+
+1. 实现 `CancellationToken.cancel()`。
+2. 实现 `CancellationToken.is_cancelled()`。
+3. 保证重复取消是幂等操作。
+4. 编写取消 token 基础行为测试。
+
+**验证：** 运行 `pytest tests/test_agent_executor.py -k cancellation`，期望通过。
+
+## T4: 实现流式双路收集器
+
+**文件：** `src/mycode/agent/collector.py`, `tests/test_agent_collector.py`
 
 **依赖：** T1, T2
 
 **步骤：**
 
-1. 实现 `ReadFileTool`，参数为 `path`。
-2. 读取工作区内文件并返回 `content`、`path`、`size`。
-3. 对不存在、目录路径、越界路径返回结构化失败。
-4. 实现 `WriteFileTool`，参数为 `path`、`content`。
-5. 写入工作区内文件，必要时创建父目录，并返回写入字节数或字符数。
-6. 对越界路径和写入失败返回结构化失败。
-7. 实现 `EditFileTool`，参数为 `path`、`old_text`、`new_text`。
-8. 当 `old_text` 唯一出现时替换并返回成功。
-9. 当匹配 0 次或多次时不修改文件，并返回明确失败原因。
-10. 编写成功读取、越界读取、成功写入、越界写入、唯一替换、0 次匹配、多次匹配测试。
+1. 实现 `CollectedResponse`。
+2. 实现 `StreamCollector.collect()`。
+3. 收到 `text_delta` 时立即产出 `AgentEvent(type="text_delta")`，同时累计完整文本。
+4. 收到 `tool_call_delta` 时按 tool call id 拼接 JSON 参数碎片。
+5. 收到 `tool_call_done` 时解析完整参数并生成 `ToolCall`。
+6. 参数 JSON 非法时生成 `parse_errors`。
+7. 收到 `token_usage` 时产出 `AgentEvent(type="token_usage")` 并记录用量。
+8. 收到 `message_done` 时产出最终 `CollectedResponse`。
+9. 编写实时文本转发、完整文本收集、单工具参数拼接、多工具拼接、非法 JSON、token usage 测试。
 
-**验证：** 运行 `pytest tests/test_tools_files.py`，期望全部通过。
+**验证：** 运行 `pytest tests/test_agent_collector.py`，期望全部通过。
 
-## T4: 实现命令工具
+## T5: 实现工具安全分类和 Plan Mode 工具集合
 
-**文件：** `src/mycode/tools/command.py`, `tests/test_tools_command.py`
+**文件：** `src/mycode/agent/tools.py`, `tests/test_agent_tools.py`
 
-**依赖：** T1, T2
-
-**步骤：**
-
-1. 实现 `RunCommandTool`，参数为 `command` 和可选 `timeout_seconds`。
-2. 使用 `workspace_root` 作为命令工作目录。
-3. 返回 `exit_code`、`stdout`、`stderr`。
-4. 成功退出码返回 `ok=True`。
-5. 非零退出码返回 `ok=False`，但不抛异常。
-6. 工具超时时返回 `ok=False` 和超时说明。
-7. 限制单次命令超时不超过 `ToolContext.timeout_seconds`。
-8. 对输出按 `max_output_chars` 截断并标记截断状态。
-9. 编写成功命令、失败命令、超时、输出截断、工作目录验证测试。
-
-**验证：** 运行 `pytest tests/test_tools_command.py`，期望全部通过。
-
-## T5: 实现搜索工具
-
-**文件：** `src/mycode/tools/search.py`, `tests/test_tools_search.py`
-
-**依赖：** T1, T2
+**依赖：** T2
 
 **步骤：**
 
-1. 实现 `FindFilesTool`，参数为 `pattern`。
-2. 在工作区内按路径或文件名模式匹配文件。
-3. 跳过 `.git`、`.venv`、`__pycache__` 和常见缓存目录。
-4. 对返回文件数量和输出字符数做限制。
-5. 实现 `SearchCodeTool`，参数为 `query` 和可选 `regex`。
-6. 支持普通文本搜索和正则搜索。
-7. 返回匹配文件、行号和内容摘要。
-8. 跳过二进制文件和被排除目录。
-9. 对非法正则返回结构化失败。
-10. 编写模式找文件、排除目录、文本搜索、正则搜索、非法正则、输出限制测试。
+1. 定义 `ToolSafety`。
+2. 定义 `ToolBatch`。
+3. 实现 `classify_tool(name)`。
+4. 将 `read_file`、`find_files`、`search_code` 分类为 `read`。
+5. 将 `write_file`、`edit_file`、`run_command` 分类为 `side_effect`。
+6. 实现 `create_readonly_registry(full_registry)`，只包含读类工具。
+7. 实现 `ToolBatcher.batch(calls)`，按相邻安全等级分批。
+8. 编写分类、只读工具集合、混合工具分批、未知工具分类测试。
 
-**验证：** 运行 `pytest tests/test_tools_search.py`，期望全部通过。
+**验证：** 运行 `pytest tests/test_agent_tools.py`，期望全部通过。
 
-## T6: 实现工具注册中心
+## T6: 实现批量工具执行器
 
-**文件：** `src/mycode/tools/registry.py`, `tests/test_tools_registry.py`
+**文件：** `src/mycode/agent/executor.py`, `tests/test_agent_executor.py`
 
-**依赖：** T3, T4, T5
+**依赖：** T3, T5
 
 **步骤：**
 
-1. 实现 `ToolRegistry.register()`。
-2. 实现 `ToolRegistry.get()`，未知工具返回清晰错误。
-3. 实现 `ToolRegistry.tool_specs()`。
-4. 实现 `ToolRegistry.as_openai_tools()`，输出 OpenAI-compatible tools 声明。
-5. 实现 `create_default_registry()`，登记六个核心工具。
-6. 防止重复工具名覆盖。
-7. 编写默认六工具登记、按名查找、未知工具、重复注册、OpenAI 声明格式测试。
+1. 实现 `BatchToolExecutor`。
+2. 接收 `ToolRegistry`、`ToolContext` 和批次列表。
+3. 对每个工具调用产出 `tool_call_started` 事件。
+4. 对每个工具结果产出 `tool_result` 事件。
+5. 对 `read` 批次使用线程池并发执行。
+6. 对 `side_effect` 批次按原顺序串行执行。
+7. 保留每个结果与原 `tool_call_id` 的映射。
+8. 在每个批次前后检查取消信号。
+9. 取消后停止后续批次执行并产出取消相关事件。
+10. 编写读批次并发、写批次串行、混合批次顺序、未知工具结果、取消测试。
 
-**验证：** 运行 `pytest tests/test_tools_registry.py`，期望全部通过。
+**验证：** 运行 `pytest tests/test_agent_executor.py`，期望全部通过。
 
-## T7: 实现工具执行器
+## T7: 实现 AgentRunner 正常循环
 
-**文件：** `src/mycode/tools/executor.py`, `tests/test_tool_executor.py`
+**文件：** `src/mycode/agent/runner.py`, `tests/test_agent_runner.py`
 
-**依赖：** T6
+**依赖：** T4, T5, T6
 
 **步骤：**
 
-1. 实现 `ToolExecutor`，接收 `ToolRegistry` 和 `ToolContext`。
-2. 根据 `ToolCall.name` 查找工具并执行。
-3. 对未知工具返回 `ToolResult(ok=False)`。
-4. 对参数类型错误返回 `ToolResult(ok=False)`。
-5. 捕获工具运行中的未处理异常并包装为结构化失败。
-6. 对工具执行应用超时策略。
-7. 保证任何工具失败都不会抛到 CLI 或 Provider。
-8. 编写成功执行、未知工具、参数错误、工具异常、超时测试。
+1. 实现 `AgentRunner.__init__()`。
+2. 保存 Provider、完整工具注册中心、工具上下文、AgentConfig 和消息历史。
+3. 实现普通 `default` 模式工具集合选择。
+4. 每轮循环发出 `progress` 事件，包含当前迭代和最大迭代。
+5. 调用 Provider 并通过 `StreamCollector` 转换事件。
+6. 无工具调用时追加 assistant 消息，发出 `done(completed)` 并停止。
+7. 有工具调用时调用 `ToolBatcher` 和 `BatchToolExecutor`。
+8. 将 assistant tool_calls 和 tool result 消息按 ID 追加到历史。
+9. 下一轮继续调用 Provider。
+10. 编写多轮工具调用后正常完成测试。
 
-**验证：** 运行 `pytest tests/test_tool_executor.py`，期望全部通过。
+**验证：** 运行 `pytest tests/test_agent_runner.py -k completed`，期望通过。
 
-## T8: 扩展 Provider 接口
+## T8: 实现停止条件
 
-**文件：** `src/mycode/providers/base.py`, `src/mycode/types.py`, `tests/test_providers.py`
+**文件：** `src/mycode/agent/runner.py`, `tests/test_agent_runner.py`
+
+**依赖：** T7
+
+**步骤：**
+
+1. 实现最大迭代次数停止。
+2. 实现取消停止。
+3. 实现连续未知工具停止。
+4. 实现 Provider 流式错误停止。
+5. 实现工具参数解析错误停止。
+6. 每种停止都产出结构化 `done` 或 `error` 事件，带 `stop_reason`。
+7. 编写 `max_iterations`、`cancelled`、`unknown_tools`、`stream_error`、`tool_parse_error` 测试。
+
+**验证：** 运行 `pytest tests/test_agent_runner.py -k "max_iterations or cancelled or unknown_tools or stream_error or tool_parse_error"`，期望通过。
+
+## T9: 实现 Plan Mode 和 Do Mode
+
+**文件：** `src/mycode/agent/runner.py`, `src/mycode/agent/tools.py`, `tests/test_agent_runner.py`, `tests/test_agent_tools.py`
+
+**依赖：** T7, T8
+
+**步骤：**
+
+1. `AgentRunner` 根据 `AgentRequest.mode` 选择工具集合。
+2. `plan` 模式使用只读工具注册中心。
+3. `do` 模式使用完整工具注册中心。
+4. `default` 模式使用完整工具注册中心。
+5. `/plan` 阶段如果模型请求副作用工具，应被视为未知或不可用工具结果。
+6. 编写 `plan` 模式工具限制测试。
+7. 编写 `plan` 模式能输出计划文本测试。
+8. 编写 `do` 模式能使用副作用工具测试。
+9. 编写普通输入默认完整工具集合测试。
+
+**验证：** 运行 `pytest tests/test_agent_runner.py -k "plan or do or default"`，期望通过。
+
+## T10: Provider Token 用量事件解析
+
+**文件：** `src/mycode/providers/openai.py`, `src/mycode/providers/anthropic.py`, `tests/test_providers.py`
 
 **依赖：** T1
 
 **步骤：**
 
-1. 修改 `LLMProvider.stream_chat()` 签名，增加 `tools` 参数。
-2. 保持默认 `tools=()`，让无工具调用路径继续兼容。
-3. 调整现有 fake provider 测试对象以接受 `tools` 参数。
-4. 验证现有普通文本测试仍能通过。
+1. OpenAI-compatible 流中出现 usage 字段时产出 `StreamEvent(type="token_usage")`。
+2. DeepSeek 继续复用 OpenAI-compatible 行为。
+3. Anthropic 流中出现 usage 字段时产出 `StreamEvent(type="token_usage")`。
+4. 未出现 usage 时不产出 token usage 事件。
+5. 编写 OpenAI usage、DeepSeek usage、Anthropic usage 测试。
 
-**验证：** 运行 `pytest tests/test_session.py tests/test_providers.py -k factory`，期望全部通过。
+**验证：** 运行 `pytest tests/test_providers.py -k usage`，期望通过。
 
-## T9: 扩展 OpenAI-compatible Provider
-
-**文件：** `src/mycode/providers/openai.py`, `src/mycode/providers/deepseek.py`, `tests/test_providers.py`
-
-**依赖：** T1, T6, T8
-
-**步骤：**
-
-1. 在请求体中加入由 `ToolSpec` 转换得到的 `tools`。
-2. 将包含 `tool_calls` 的 assistant 消息转换为 OpenAI Chat Completions 消息格式。
-3. 将 `tool` 消息转换为 OpenAI tool result 消息格式。
-4. 解析 `choices[0].delta.tool_calls` 中的工具调用 ID、名称和参数碎片。
-5. 输出 `tool_call_delta` 和 `tool_call_done` 事件。
-6. 保持 `[DONE]` 生成 `message_done`。
-7. 保证 DeepSeek 继续复用该行为。
-8. 编写工具声明入参、assistant tool_calls 消息转换、tool result 消息转换、参数碎片解析、DeepSeek 复用测试。
-
-**验证：** 运行 `pytest tests/test_providers.py -k "openai or deepseek"`，期望全部通过。
-
-## T10: 扩展 Anthropic Provider
-
-**文件：** `src/mycode/providers/anthropic.py`, `tests/test_providers.py`
-
-**依赖：** T1, T6, T8
-
-**步骤：**
-
-1. 把通用 `ToolSpec` 转换为 Anthropic tools 格式。
-2. 将包含 `tool_calls` 的 assistant 消息转换为 Anthropic `tool_use` 内容块。
-3. 将 `tool` 消息转换为 Anthropic `tool_result` 内容块。
-4. 保持现有 thinking 配置行为。
-5. 解析 `content_block_start` 中的工具 ID 和工具名。
-6. 解析 `input_json_delta` 中的参数碎片。
-7. 在 `content_block_stop` 时输出 `tool_call_done`。
-8. 在 `message_stop` 时输出 `message_done`。
-9. 编写工具声明转换、工具消息转换、工具结果消息转换、参数碎片解析、thinking 回归测试。
-
-**验证：** 运行 `pytest tests/test_providers.py -k anthropic`，期望全部通过。
-
-## T11: 实现工具调用参数拼接
-
-**文件：** `src/mycode/session.py`, `tests/test_tool_streaming.py`
-
-**依赖：** T1, T8, T9, T10
-
-**步骤：**
-
-1. 在会话层维护 `PendingToolCall` 集合。
-2. 收到 `tool_call_delta` 时按工具调用 ID 追加 JSON 参数碎片。
-3. 收到 `tool_call_done` 时解析完整 JSON。
-4. 参数合法时生成 `ToolCall`。
-5. 参数不是合法 JSON 时生成失败 `ToolResult`。
-6. 支持同一轮中多个工具调用的拼接和顺序保留，但本阶段只执行这一轮。
-7. 编写单工具碎片拼接、多工具拼接、非法 JSON 失败结果测试。
-
-**验证：** 运行 `pytest tests/test_tool_streaming.py`，期望全部通过。
-
-## T12: 实现会话单轮工具闭环
-
-**文件：** `src/mycode/session.py`, `tests/test_session_tools.py`, `tests/test_session.py`
-
-**依赖：** T7, T11
-
-**步骤：**
-
-1. 修改 `ChatSession.__init__()`，接收可选 `ToolRegistry` 和 `ToolContext`。
-2. 用户输入后第一轮 Provider 请求携带工具声明。
-3. 普通文本回复继续汇总并追加 assistant 消息。
-4. 出现工具调用时，汇总 assistant 的工具调用消息并追加历史。
-5. 对每个 `ToolCall` 发送 `tool_started` 事件。
-6. 通过 `ToolExecutor` 执行工具。
-7. 对每个结果发送 `tool_finished` 事件。
-8. 把工具结果序列化为 tool 消息追加历史。
-9. 发起一次后续 Provider 请求，生成最终文本回复。
-10. 后续 Provider 请求不携带工具声明，避免第二轮自动工具执行。
-11. 如果后续回复仍产生工具调用事件，本阶段不执行，并返回清晰停止边界。
-12. 编写普通聊天回归、工具成功回灌、工具失败回灌、未知工具、单轮停止边界测试。
-
-**验证：** 运行 `pytest tests/test_session.py tests/test_session_tools.py`，期望全部通过。
-
-## T13: 集成 CLI 工具状态展示
+## T11: CLI 切换到 AgentRunner
 
 **文件：** `src/mycode/cli.py`, `tests/test_cli.py`
 
-**依赖：** T12
+**依赖：** T7, T8, T9
 
 **步骤：**
 
-1. CLI 启动时创建默认工具注册中心。
-2. CLI 启动时创建默认 `ToolContext`，工作区根目录为当前进程启动目录。
-3. 构造 `ChatSession` 时传入工具注册中心和工具上下文。
-4. 收到 `tool_started` 时打印工具开始提示。
-5. 收到 `tool_finished` 时打印成功或失败状态和简短消息。
-6. 保持文本增量流式打印。
-7. 保持配置错误、Provider 错误和退出命令行为。
-8. 编写工具开始展示、工具成功展示、工具失败展示、普通聊天回归测试。
+1. CLI 启动时创建 `AgentRunner`。
+2. 普通输入解析为 `AgentRequest(mode="default")`。
+3. `/plan ...` 解析为 `AgentRequest(mode="plan")`。
+4. `/do ...` 解析为 `AgentRequest(mode="do")`。
+5. CLI 捕获 Ctrl+C 时触发 `CancellationToken.cancel()`。
+6. CLI 消费 `AgentEvent(type="text_delta")` 并实时打印文本。
+7. CLI 消费 `progress` 事件并简短展示迭代进度。
+8. CLI 消费 `tool_call_started` 和 `tool_result` 事件并展示工具状态。
+9. CLI 消费 `done` 和 `error` 事件并展示停止原因。
+10. 保持退出命令、配置错误、Provider 错误展示行为。
+11. 编写普通输入、`/plan`、`/do`、工具事件展示、停止原因展示、退出命令回归测试。
 
 **验证：** 运行 `pytest tests/test_cli.py`，期望全部通过。
 
-## T14: 更新文档说明
+## T12: 兼容层和旧测试回归
 
-**文件：** `README.md`
+**文件：** `src/mycode/session.py`, `tests/test_session.py`, `tests/test_session_tools.py`
 
-**依赖：** T13
+**依赖：** T11
 
 **步骤：**
 
-1. 增加工具系统能力说明。
-2. 列出六个核心工具。
-3. 明确文件和命令默认限制在工作区内。
-4. 明确本阶段不是完整自动 Agent Loop。
-5. 补充工具系统测试命令。
+1. 明确 `ChatSession` 是兼容层还是委托 `AgentRunner`。
+2. 保持已有 `tests/test_session.py` 通过。
+3. 根据新 AgentRunner 行为调整或保留 `tests/test_session_tools.py`。
+4. 确保旧的一轮工具回灌测试不与新默认 Agent Loop 语义冲突。
 
-**验证：** 阅读 `README.md`，确认没有暗示多轮自动工具循环已经实现。
+**验证：** 运行 `pytest tests/test_session.py tests/test_session_tools.py`，期望全部通过。
 
-## T15: 全量回归和静态检查
+## T13: 更新文档说明
+
+**文件：** `README.md`
+
+**依赖：** T11
+
+**步骤：**
+
+1. 增加 Agent Loop 能力说明。
+2. 说明默认输入会进入多轮 Agent Loop。
+3. 说明停止条件：完成、迭代上限、取消、未知工具、流错误。
+4. 说明 `/plan` 只开放读类工具。
+5. 说明 `/do` 使用完整工具集合。
+6. 明确本阶段仍不做权限系统、上下文压缩、交互式确认和复杂 TUI。
+7. 补充 Agent Loop 测试命令。
+
+**验证：** 阅读 `README.md`，确认范围边界与 `spec.md` 一致。
+
+## T14: 全量验证
 
 **文件：** `src/mycode/**`, `tests/**`
 
-**依赖：** T1-T14
+**依赖：** T1-T13
 
 **步骤：**
 
 1. 运行 Python 语法检查。
-2. 运行全部 pytest。
-3. 搜索旧项目名或错误项目名。
-4. 搜索明显真实 API Key 模式。
-5. 修复本阶段引入的失败。
+2. 运行新增 Agent 测试。
+3. 运行现有工具系统测试。
+4. 运行 Provider、Session、CLI 回归测试。
+5. 运行全量 `pytest`。
+6. 搜索错误项目名。
+7. 搜索明显真实 API Key 模式。
+8. 修复本阶段引入的失败后重跑相关验证。
 
-**验证：** 运行 `python -m compileall src` 和 `pytest`，期望全部通过；运行项目名和 API Key 搜索，确认无新增问题。
+**验证：** 运行 `PYTHONPYCACHEPREFIX=.pycache .venv/bin/python -m compileall src tests` 和 `PYTHONPYCACHEPREFIX=.pycache .venv/bin/python -m pytest`，期望全部通过；项目名和 API Key 扫描无新增问题。
 
 ## 执行顺序
 
 ```text
 T1
 → T2
-→ T3 → T4 → T5
+→ T3
+→ T4
+→ T5
 → T6
 → T7
 → T8
-→ T9 → T10
+→ T9
+→ T10
 → T11
 → T12
 → T13
 → T14
-→ T15
 ```
