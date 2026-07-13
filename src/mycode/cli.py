@@ -13,7 +13,7 @@ from .agent.runner import AgentRunner
 from .config import load_config
 from .providers.factory import create_provider
 from .tools.registry import create_default_registry
-from .types import ConfigError, ProviderError, ToolContext
+from .types import ConfigError, ProviderError, TokenUsage, ToolContext
 
 
 EXIT_COMMANDS = {"exit", "quit", "退出"}
@@ -78,6 +78,10 @@ def main(argv: Sequence[str] | None = None) -> int:
                     status = "成功" if result and result.ok else "失败"
                     message = result.message if result else ""
                     print(f"[tool] {event.tool_name} {status}：{message}", flush=True)
+                elif event.type == "token_usage":
+                    usage_text = format_token_usage(event.token_usage)
+                    if usage_text:
+                        print(f"\n[usage] {usage_text}", flush=True)
                 elif event.type == "done":
                     if event.stop_reason and event.stop_reason != "completed":
                         print(f"\n[agent] 停止：{event.message}", flush=True)
@@ -99,3 +103,17 @@ def parse_agent_request(user_text: str) -> AgentRequest:
     if user_text.startswith("/do"):
         return AgentRequest(text=user_text.removeprefix("/do").strip(), mode="do")
     return AgentRequest(text=user_text, mode="default")
+
+
+def format_token_usage(usage: TokenUsage | None) -> str:
+    if usage is None:
+        return ""
+
+    parts: list[str] = []
+    if usage.input_tokens is not None:
+        parts.append(f"input={usage.input_tokens}")
+    if usage.output_tokens is not None:
+        parts.append(f"output={usage.output_tokens}")
+    if usage.total_tokens is not None:
+        parts.append(f"total={usage.total_tokens}")
+    return " ".join(parts)
