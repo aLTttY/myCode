@@ -1,27 +1,26 @@
 from __future__ import annotations
 
-from collections.abc import Iterator, Sequence
+from collections.abc import Iterator
 from pathlib import Path
 
 from mycode.agent.cancellation import CancellationToken
 from mycode.agent.config import AgentConfig, AgentRequest
 from mycode.agent.runner import AgentRunner
-from mycode.providers.base import LLMProvider
+from mycode.providers.base import ChatRequest, LLMProvider
 from mycode.tools.registry import create_default_registry
-from mycode.types import Message, ProviderError, StreamEvent, ToolContext, ToolSpec
+from mycode.types import ProviderError, StreamEvent, ToolContext
 
 
 class ScriptedProvider:
     def __init__(self, scripts: list[list[StreamEvent]]) -> None:
         self.scripts = scripts
-        self.calls: list[tuple[tuple[Message, ...], tuple[ToolSpec, ...]]] = []
+        self.calls: list[ChatRequest] = []
 
     def stream_chat(
         self,
-        messages: Sequence[Message],
-        tools: Sequence[ToolSpec] = (),
+        request: ChatRequest,
     ) -> Iterator[StreamEvent]:
-        self.calls.append((tuple(messages), tuple(tools)))
+        self.calls.append(request)
         script = self.scripts[min(len(self.calls) - 1, len(self.scripts) - 1)]
         yield from script
 
@@ -29,8 +28,7 @@ class ScriptedProvider:
 class BrokenProvider:
     def stream_chat(
         self,
-        messages: Sequence[Message],
-        tools: Sequence[ToolSpec] = (),
+        request: ChatRequest,
     ) -> Iterator[StreamEvent]:
         raise ProviderError("stream broke")
         yield StreamEvent(type="message_done")
@@ -59,7 +57,7 @@ def test_agent_runner_completed_after_multiple_iterations(tmp_path: Path) -> Non
 
     assert [event.stop_reason for event in events if event.type == "done"] == ["completed"]
     assert len(provider.calls) == 2
-    assert provider.calls[1][0][-1].role == "tool"
+    assert provider.calls[1].messages[-1].role == "tool"
 
 
 def test_agent_runner_writes_each_tool_result_to_history(tmp_path: Path) -> None:
@@ -78,7 +76,7 @@ def test_agent_runner_writes_each_tool_result_to_history(tmp_path: Path) -> None
 
     list(runner(provider, tmp_path).run(AgentRequest("read both")))
 
-    tool_messages = [message for message in provider.calls[1][0] if message.role == "tool"]
+    tool_messages = [message for message in provider.calls[1].messages if message.role == "tool"]
     assert {message.tool_call_id for message in tool_messages} == {"1", "2"}
 
 
@@ -150,7 +148,9 @@ def test_agent_runner_plan_mode_uses_readonly_tools(tmp_path: Path) -> None:
 
     events = list(runner(provider, tmp_path).run(AgentRequest("inspect", mode="plan")))
 
-    assert {tool.name for tool in provider.calls[0][1]} == {"read_file", "find_files", "search_code"}
+    assert {tool.name for tool in provider.calls[0].tools} == {"read_file", "find_files", "search_code"}
+    assert provider.calls[0].messages[-1].content == "inspect"
+    assert "Plan Mode" in provider.calls[0].dynamic_system_messages[1].render()
     assert any(event.type == "text_delta" and event.text == "plan" for event in events)
 
 
@@ -164,5 +164,32 @@ def test_agent_runner_do_and_default_use_full_tools(tmp_path: Path) -> None:
     list(agent.run(AgentRequest("execute", mode="do")))
     list(agent.run(AgentRequest("execute", mode="default")))
 
-    assert "write_file" in {tool.name for tool in provider.calls[0][1]}
-    assert "run_command" in {tool.name for tool in provider.calls[1][1]}
+    assert "write_file" in {tool.name for tool in provider.calls[0].tools}
+    assert "run_command" in {tool.name for tool in provider.calls[1].tools}
+
+
+def test_agent_runner_uses_structured_prompt_and_reinforced_tools(tmp_path: Path) -> None:
+    provider = ScriptedProvider([[StreamEvent(type="text_delta", text="ok"), StreamEvent(type="message_done")]])
+
+    list(runner(provider, tmp_path).run(AgentRequest("hello")))
+
+    request = provider.calls[0]
+    assert "## 身份" in request.stable_system_prompt
+    assert "mewcode_environment" in request.dynamic_system_messages[0].render()
+    assert "mewcode_runtime_instruction" in request.dynamic_system_messages[1].render()
+    assert any("Use this tool first" in tool.description for tool in request.tools)
+
+
+def test_agent_runner_repeats_full_mode_instruction_by_interval(tmp_path: Path) -> None:
+    (tmp_path / "a.txt").write_text("hello", encoding="utf-8")
+    provider = ScriptedProvider([
+        tool_call_events("1", "read_file", '{"path": "a.txt"}'),
+        tool_call_events("2", "read_file", '{"path": "a.txt"}'),
+        [StreamEvent(type="text_delta", text="done"), StreamEvent(type="message_done")],
+    ])
+
+    list(runner(provider, tmp_path, AgentConfig(prompt_repeat_interval=3)).run(AgentRequest("read", mode="plan")))
+
+    assert provider.calls[0].dynamic_system_messages[1].full is True
+    assert provider.calls[1].dynamic_system_messages[1].full is False
+    assert provider.calls[2].dynamic_system_messages[1].full is True

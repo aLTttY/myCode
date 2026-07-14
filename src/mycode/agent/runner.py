@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 from collections.abc import Iterator
 from dataclasses import asdict
+from datetime import date
 
 from mycode.agent.cancellation import CancellationToken
 from mycode.agent.collector import CollectedResponse, StreamCollector
@@ -10,7 +11,9 @@ from mycode.agent.config import AgentConfig, AgentRequest
 from mycode.agent.events import AgentEvent, done_event, progress_event
 from mycode.agent.executor import BatchToolExecutor
 from mycode.agent.tools import ToolBatcher, create_readonly_registry
-from mycode.providers.base import LLMProvider
+from mycode.prompts.builder import EnvironmentInfo, PromptBuilder
+from mycode.providers.base import ChatRequest, LLMProvider
+from mycode.tools.descriptions import reinforce_tool_specs
 from mycode.types import Message, ProviderError, ToolCall, ToolContext, ToolResult
 from mycode.tools.registry import ToolRegistry
 
@@ -36,8 +39,7 @@ class AgentRunner:
     ) -> Iterator[AgentEvent]:
         cancellation = cancellation or CancellationToken()
         registry = self._registry_for_request(request)
-        user_text = _request_text(request)
-        self.messages.append(Message(role="user", content=user_text))
+        self.messages.append(Message(role="user", content=request.text))
         consecutive_unknown_tools = 0
 
         for iteration in range(1, self.config.max_iterations + 1):
@@ -47,7 +49,8 @@ class AgentRunner:
 
             yield progress_event(iteration, self.config.max_iterations, f"iteration {iteration}/{self.config.max_iterations}")
             try:
-                provider_events = self.provider.stream_chat(tuple(self.messages), tools=registry.tool_specs())
+                chat_request = self._chat_request(request, registry, iteration)
+                provider_events = self.provider.stream_chat(chat_request)
                 collected = yield from self._collect_provider_response(provider_events)
             except ProviderError as exc:
                 yield AgentEvent(type="error", stop_reason="stream_error", message=exc.user_message)
@@ -134,13 +137,24 @@ class AgentRunner:
             return create_readonly_registry(self.full_registry)
         return self.full_registry
 
-
-def _request_text(request: AgentRequest) -> str:
-    if request.mode == "plan":
-        return "Plan Mode：只能观察项目和输出计划，不要修改文件或执行命令。\n\n" + request.text
-    if request.mode == "do":
-        return "Do Mode：根据用户任务或已有计划执行实际工作。\n\n" + request.text
-    return request.text
+    def _chat_request(self, request: AgentRequest, registry: ToolRegistry, iteration: int) -> ChatRequest:
+        environment = EnvironmentInfo(
+            cwd=str(self.tool_context.workspace_root),
+            date=date.today().isoformat(),
+            mode=request.mode,
+        )
+        prompt = PromptBuilder(repeat_interval=self.config.prompt_repeat_interval).build(
+            mode=request.mode,
+            iteration=iteration,
+            environment=environment,
+        )
+        return ChatRequest(
+            stable_system_prompt=prompt.stable_system_prompt,
+            dynamic_system_messages=(prompt.environment_message, *prompt.dynamic_system_messages),
+            messages=tuple(self.messages),
+            optional_system_prompt=prompt.optional_system_prompt,
+            tools=reinforce_tool_specs(registry.tool_specs()),
+        )
 
 
 def _is_unknown_tool_result(result: ToolResult) -> bool:

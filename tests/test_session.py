@@ -1,24 +1,25 @@
-from collections.abc import Iterator, Sequence
+from collections.abc import Iterator
 
 import pytest
 
+from mycode.providers.base import ChatRequest
 from mycode.session import ChatSession
 from mycode.types import Message, ProviderError, StreamEvent
 
 
 class FakeProvider:
     def __init__(self) -> None:
-        self.calls: list[tuple[Message, ...]] = []
+        self.calls: list[ChatRequest] = []
 
-    def stream_chat(self, messages: Sequence[Message]) -> Iterator[StreamEvent]:
-        self.calls.append(tuple(messages))
+    def stream_chat(self, request: ChatRequest) -> Iterator[StreamEvent]:
+        self.calls.append(request)
         yield StreamEvent(type="text_delta", text="你好")
         yield StreamEvent(type="text_delta", text="！")
         yield StreamEvent(type="message_done")
 
 
 class BrokenProvider:
-    def stream_chat(self, messages: Sequence[Message]) -> Iterator[StreamEvent]:
+    def stream_chat(self, request: ChatRequest) -> Iterator[StreamEvent]:
         raise ProviderError("失败")
         yield StreamEvent(type="message_done")
 
@@ -47,7 +48,7 @@ def test_session_sends_full_history_on_next_turn() -> None:
     list(session.send("第一轮"))
     list(session.send("第二轮"))
 
-    assert provider.calls[1] == (
+    assert provider.calls[1].messages == (
         Message(role="user", content="第一轮"),
         Message(role="assistant", content="你好！"),
         Message(role="user", content="第二轮"),

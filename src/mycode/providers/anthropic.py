@@ -1,10 +1,11 @@
 from __future__ import annotations
 
 import json
-from collections.abc import Iterator, Sequence
+from collections.abc import Iterator
 
 import httpx
 
+from mycode.providers.base import ChatRequest
 from mycode.providers.sse import iter_sse_data_lines
 from mycode.types import AppConfig, Message, ProviderError, StreamEvent, TokenUsage, ToolCall, ToolSpec
 
@@ -20,10 +21,9 @@ class AnthropicProvider:
 
     def stream_chat(
         self,
-        messages: Sequence[Message],
-        tools: Sequence[ToolSpec] = (),
+        request: ChatRequest,
     ) -> Iterator[StreamEvent]:
-        payload = self._build_payload(messages, tools)
+        payload = self._build_payload(request)
         headers = {
             "x-api-key": self.config.api_key,
             "anthropic-version": ANTHROPIC_VERSION,
@@ -43,17 +43,19 @@ class AnthropicProvider:
 
     def _build_payload(
         self,
-        messages: Sequence[Message],
-        tools: Sequence[ToolSpec] = (),
+        request: ChatRequest,
     ) -> dict[str, object]:
         payload: dict[str, object] = {
             "model": self.config.model,
-            "messages": [self._convert_message(message) for message in messages],
+            "messages": [self._convert_message(message) for message in request.messages],
             "max_tokens": DEFAULT_MAX_TOKENS,
             "stream": True,
         }
-        if tools:
-            payload["tools"] = [_anthropic_tool(tool) for tool in tools]
+        system = _anthropic_system(request)
+        if system:
+            payload["system"] = system
+        if request.tools:
+            payload["tools"] = [_anthropic_tool(tool, cache_control=request.cache_static_content) for tool in request.tools]
 
         thinking = self.config.thinking
         if thinking and thinking.enabled:
@@ -150,12 +152,32 @@ def _raise_for_status(response: httpx.Response) -> None:
         raise ProviderError(f"Claude API 请求失败，HTTP 状态码：{status}") from exc
 
 
-def _anthropic_tool(spec: ToolSpec) -> dict[str, object]:
-    return {
+def _anthropic_system(request: ChatRequest) -> list[dict[str, object]]:
+    blocks: list[dict[str, object]] = []
+    if request.stable_system_prompt:
+        stable: dict[str, object] = {"type": "text", "text": request.stable_system_prompt}
+        if request.cache_static_content:
+            stable["cache_control"] = {"type": "ephemeral"}
+        blocks.append(stable)
+    dynamic_messages = list(request.dynamic_system_messages)
+    if dynamic_messages:
+        blocks.append({"type": "text", "text": dynamic_messages[0].render()})
+        dynamic_messages = dynamic_messages[1:]
+    if request.optional_system_prompt:
+        blocks.append({"type": "text", "text": request.optional_system_prompt})
+    blocks.extend({"type": "text", "text": instruction.render()} for instruction in dynamic_messages)
+    return blocks
+
+
+def _anthropic_tool(spec: ToolSpec, cache_control: bool = False) -> dict[str, object]:
+    converted: dict[str, object] = {
         "name": spec.name,
         "description": spec.description,
         "input_schema": spec.parameters,
     }
+    if cache_control:
+        converted["cache_control"] = {"type": "ephemeral"}
+    return converted
 
 
 def _anthropic_tool_call(call: ToolCall) -> dict[str, object]:
@@ -170,6 +192,8 @@ def _anthropic_tool_call(call: ToolCall) -> dict[str, object]:
 def _token_usage(usage: dict[str, object]) -> TokenUsage:
     input_tokens = usage.get("input_tokens")
     output_tokens = usage.get("output_tokens")
+    cache_read_tokens = usage.get("cache_read_input_tokens")
+    cache_creation_tokens = usage.get("cache_creation_input_tokens")
     total_tokens = None
     if isinstance(input_tokens, int) and isinstance(output_tokens, int):
         total_tokens = input_tokens + output_tokens
@@ -177,4 +201,7 @@ def _token_usage(usage: dict[str, object]) -> TokenUsage:
         input_tokens=input_tokens if isinstance(input_tokens, int) else None,
         output_tokens=output_tokens if isinstance(output_tokens, int) else None,
         total_tokens=total_tokens,
+        cache_read_tokens=cache_read_tokens if isinstance(cache_read_tokens, int) else None,
+        cache_creation_tokens=cache_creation_tokens if isinstance(cache_creation_tokens, int) else None,
+        cache_unavailable=not isinstance(cache_read_tokens, int) and not isinstance(cache_creation_tokens, int),
     )

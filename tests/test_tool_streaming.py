@@ -1,22 +1,22 @@
-from collections.abc import Iterator, Sequence
+from collections.abc import Iterator
 from pathlib import Path
 
+from mycode.providers.base import ChatRequest
 from mycode.session import ChatSession
 from mycode.tools.registry import create_default_registry
-from mycode.types import Message, StreamEvent, ToolContext, ToolSpec
+from mycode.types import StreamEvent, ToolContext
 
 
 class ToolCallProvider:
     def __init__(self, events: list[StreamEvent]) -> None:
         self.events = events
-        self.calls: list[tuple[tuple[Message, ...], tuple[ToolSpec, ...]]] = []
+        self.calls: list[ChatRequest] = []
 
     def stream_chat(
         self,
-        messages: Sequence[Message],
-        tools: Sequence[ToolSpec] = (),
+        request: ChatRequest,
     ) -> Iterator[StreamEvent]:
-        self.calls.append((tuple(messages), tuple(tools)))
+        self.calls.append(request)
         if len(self.calls) == 1:
             yield from self.events
         else:
@@ -39,8 +39,8 @@ def test_single_tool_call_json_fragments(tmp_path: Path) -> None:
 
     list(session(provider, tmp_path).send("read"))
 
-    assert provider.calls[1][0][-1].role == "tool"
-    assert "hello" in provider.calls[1][0][-1].content
+    assert provider.calls[1].messages[-1].role == "tool"
+    assert "hello" in provider.calls[1].messages[-1].content
 
 
 def test_multiple_tool_calls_keep_order(tmp_path: Path) -> None:
@@ -56,7 +56,7 @@ def test_multiple_tool_calls_keep_order(tmp_path: Path) -> None:
 
     list(session(provider, tmp_path).send("read both"))
 
-    tool_messages = [message for message in provider.calls[1][0] if message.role == "tool"]
+    tool_messages = [message for message in provider.calls[1].messages if message.role == "tool"]
     assert [message.tool_call_id for message in tool_messages] == ["1", "2"]
 
 
@@ -69,4 +69,4 @@ def test_invalid_json_becomes_tool_result(tmp_path: Path) -> None:
 
     list(session(provider, tmp_path).send("bad"))
 
-    assert "合法 JSON" in provider.calls[1][0][-1].content
+    assert "合法 JSON" in provider.calls[1].messages[-1].content

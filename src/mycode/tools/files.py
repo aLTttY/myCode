@@ -14,7 +14,12 @@ class ReadFileTool:
             description="Read a UTF-8 text file inside the workspace.",
             parameters={
                 "type": "object",
-                "properties": {"path": {"type": "string", "description": "Workspace-relative file path."}},
+                "properties": {
+                    "path": {
+                        "type": "string",
+                        "description": "Workspace-relative file path. Absolute paths are invalid; use values like `test.md`.",
+                    }
+                },
                 "required": ["path"],
                 "additionalProperties": False,
             },
@@ -47,7 +52,10 @@ class WriteFileTool:
             parameters={
                 "type": "object",
                 "properties": {
-                    "path": {"type": "string", "description": "Workspace-relative file path."},
+                    "path": {
+                        "type": "string",
+                        "description": "Workspace-relative file path. Absolute paths are invalid; use values like `test.md`.",
+                    },
                     "content": {"type": "string", "description": "Complete file content."},
                 },
                 "required": ["path", "content"],
@@ -77,7 +85,10 @@ class EditFileTool:
             parameters={
                 "type": "object",
                 "properties": {
-                    "path": {"type": "string", "description": "Workspace-relative file path."},
+                    "path": {
+                        "type": "string",
+                        "description": "Workspace-relative file path. Absolute paths are invalid; use values like `test.md`.",
+                    },
                     "old_text": {"type": "string", "description": "Original text that must match exactly once."},
                     "new_text": {"type": "string", "description": "Replacement text."},
                 },

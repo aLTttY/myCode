@@ -25,6 +25,13 @@ def test_file_tools_reject_outside_path(tmp_path: Path) -> None:
     assert "工作区外" in result.message
 
 
+def test_file_tools_reject_absolute_path(tmp_path: Path) -> None:
+    result = WriteFileTool().run({"path": str(tmp_path / "a.txt"), "content": ""}, context(tmp_path))
+
+    assert result.ok is False
+    assert "相对路径" in result.message
+
+
 def test_file_tools_reject_symlink_outside_path(tmp_path: Path) -> None:
     outside = tmp_path.parent / "outside.txt"
     outside.write_text("secret", encoding="utf-8")

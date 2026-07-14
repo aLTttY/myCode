@@ -5,7 +5,7 @@ from collections.abc import Iterator, Sequence
 from dataclasses import asdict
 from pathlib import Path
 
-from .providers.base import LLMProvider
+from .providers.base import LLMProvider, plain_chat_request
 from .tools.executor import ToolExecutor
 from .tools.registry import ToolRegistry
 from .types import Message, PendingToolCall, StreamEvent, ToolCall, ToolContext, ToolResult
@@ -62,7 +62,7 @@ class ChatSession:
 
     def _send_plain(self) -> Iterator[StreamEvent]:
         assistant_parts: list[str] = []
-        for event in self.provider.stream_chat(tuple(self.messages)):
+        for event in self.provider.stream_chat(plain_chat_request(self.messages)):
             if event.type == "text_delta":
                 assistant_parts.append(event.text)
                 yield event
@@ -78,7 +78,7 @@ class ChatSession:
         tool_results: list[tuple[str, ToolResult]] = []
         specs = self.tool_registry.tool_specs() if self.tool_registry else []
 
-        for event in self.provider.stream_chat(tuple(self.messages), tools=specs):
+        for event in self.provider.stream_chat(plain_chat_request(self.messages, tools=specs)):
             if event.type == "text_delta":
                 assistant_parts.append(event.text)
                 yield event
@@ -147,7 +147,7 @@ class ChatSession:
     def _send_followup(self) -> Iterator[StreamEvent]:
         assistant_parts: list[str] = []
         saw_forbidden_tool_call = False
-        for event in self.provider.stream_chat(tuple(self.messages), tools=()):
+        for event in self.provider.stream_chat(plain_chat_request(self.messages, tools=())):
             if event.type == "text_delta":
                 assistant_parts.append(event.text)
                 yield event

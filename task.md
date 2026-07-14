@@ -1,307 +1,244 @@
-# myCode Agent Loop Tasks
+# Structured System Prompt Tasks
 
 ## 文件清单
 
 | 操作 | 文件 | 职责 |
 |------|------|------|
-| 已有 | `spec.md` | 已批准 Agent Loop 需求文档 |
-| 已有 | `plan.md` | 已批准 Agent Loop 技术设计文档 |
-| 修改 | `src/mycode/types.py` | 扩展 Provider 事件以承载 Token 用量 |
-| 修改 | `src/mycode/providers/openai.py` | 解析 OpenAI-compatible token usage 事件 |
-| 修改 | `src/mycode/providers/deepseek.py` | 继续复用 OpenAI-compatible 行为 |
-| 修改 | `src/mycode/providers/anthropic.py` | 解析 Anthropic token usage 事件 |
-| 修改 | `src/mycode/cli.py` | 改为创建 AgentRunner、解析 `/plan` 和 `/do`、消费 AgentEvent |
-| 修改 | `src/mycode/session.py` | 保留兼容层，避免继续承载 Agent Loop 主逻辑 |
-| 修改 | `README.md` | 说明 Agent Loop、停止条件、Plan Mode 和范围边界 |
-| 新建 | `src/mycode/agent/__init__.py` | Agent 包导出 |
-| 新建 | `src/mycode/agent/config.py` | AgentConfig、AgentRequest、AgentMode |
-| 新建 | `src/mycode/agent/events.py` | AgentEvent、TokenUsage、停止原因和事件构造 |
-| 新建 | `src/mycode/agent/cancellation.py` | CancellationToken |
-| 新建 | `src/mycode/agent/collector.py` | StreamCollector 双路流式收集 |
-| 新建 | `src/mycode/agent/tools.py` | 工具安全分类、只读注册中心和批处理 |
-| 新建 | `src/mycode/agent/executor.py` | BatchToolExecutor，并发读批次、串行副作用批次 |
-| 新建 | `src/mycode/agent/runner.py` | AgentRunner ReAct 循环和停止条件 |
-| 新建 | `tests/test_agent_collector.py` | 流式双路收集测试 |
-| 新建 | `tests/test_agent_tools.py` | 工具分类、只读注册中心、批处理测试 |
-| 新建 | `tests/test_agent_executor.py` | 批次执行、并发/串行、取消测试 |
-| 新建 | `tests/test_agent_runner.py` | 正常完成、迭代上限、未知工具、流错误测试 |
-| 修改 | `tests/test_cli.py` | `/plan`、`/do`、AgentEvent 展示和取消回归测试 |
-| 修改 | `tests/test_providers.py` | Token 用量事件解析测试 |
-| 修改 | `tests/test_session.py` | 兼容层回归测试 |
+| 已有 | `spec.md` | 已批准结构化系统提示需求文档 |
+| 已有 | `plan.md` | 已批准结构化系统提示技术设计文档 |
+| 修改 | `src/mycode/types.py` | 扩展 `TokenUsage` 缓存指标 |
+| 修改 | `src/mycode/agent/config.py` | 增加模式指令重复间隔配置 |
+| 修改 | `src/mycode/agent/runner.py` | 构造 `ChatRequest`，移除模式说明拼接用户文本 |
+| 修改 | `src/mycode/providers/base.py` | 定义 `ChatRequest`，升级 Provider 协议 |
+| 修改 | `src/mycode/providers/openai.py` | 转换系统提示/动态消息/工具描述，解析缓存字段 |
+| 修改 | `src/mycode/providers/deepseek.py` | 继续复用 OpenAI-compatible 请求与缓存解析 |
+| 修改 | `src/mycode/providers/anthropic.py` | 转换 Anthropic system blocks，加入缓存控制和缓存解析 |
+| 修改 | `src/mycode/cli.py` | 展示 cache usage 字段 |
+| 修改 | `tests/test_agent_runner.py` | AgentRunner 请求构造、模式注入和回归测试 |
+| 修改 | `tests/test_providers.py` | Provider payload 与缓存字段解析测试 |
+| 修改 | `tests/test_cli.py` | cache usage 展示测试 |
+| 修改 | `tests/test_tool_streaming.py` | Provider 协议升级后的工具流回归测试 |
+| 修改 | `tests/test_session_tools.py` | Provider 协议升级后的会话工具回归测试 |
+| 修改 | `README.md` | 如有必要，补充结构化提示和缓存观测说明 |
+| 新建 | `src/mycode/prompts/__init__.py` | 提示构建包导出 |
+| 新建 | `src/mycode/prompts/modules.py` | 固定模块、可选模块和提示数据结构 |
+| 新建 | `src/mycode/prompts/modes.py` | 模式动态指令与注入频率 |
+| 新建 | `src/mycode/prompts/builder.py` | `PromptBuilder`、`PromptBundle`、环境信息构建 |
+| 新建 | `src/mycode/tools/descriptions.py` | 工具描述强化 |
+| 新建 | `tests/test_prompts.py` | 模块顺序、稳定/动态分离、模式注入测试 |
+| 新建 | `tests/test_tool_descriptions.py` | 工具描述强化测试 |
+| 新建 | `docs/manual-eval-structured-prompts.md` | 人工对比场景和观察点 |
 
-## T1: 扩展基础事件类型
+## T1: 扩展共享类型和 Provider 请求协议
 
-**文件：** `src/mycode/types.py`, `tests/test_providers.py`
+**文件：** `src/mycode/types.py`, `src/mycode/providers/base.py`, `tests/test_providers.py`
 
 **依赖：** 已批准 `spec.md`、`plan.md`
 
 **步骤：**
 
-1. 新增 `TokenUsage` 数据结构，字段允许为空。
-2. 扩展 `StreamEvent.type`，支持 `token_usage`。
-3. 为 `StreamEvent` 增加 `token_usage` 字段。
-4. 保持现有 `text_delta`、`tool_call_delta`、`tool_call_done`、`message_done` 行为兼容。
-5. 更新测试中的 `StreamEvent` 构造断言。
+1. 为 `TokenUsage` 增加 `cache_read_tokens`、`cache_creation_tokens`、`cache_unavailable` 字段。
+2. 定义 `ChatRequest`，包含稳定系统提示、动态系统消息、普通消息、可选系统提示、工具列表和缓存开关。
+3. 调整 `LLMProvider` 协议为 `stream_chat(request: ChatRequest)`。
+4. 更新测试中的 fake Provider 或辅助构造，使测试能记录和断言 `ChatRequest`。
+5. 保持未使用缓存字段时的现有 token usage 行为兼容。
 
-**验证：** 运行 `pytest tests/test_providers.py tests/test_session.py`，期望已有测试通过。
+**验证：** 运行 `PYTHONPATH=src .venv/bin/python -m compileall src/mycode/types.py src/mycode/providers/base.py`，期望无语法错误。
 
-## T2: 增加 Agent 配置和事件模型
+## T2: 实现固定提示模块
 
-**文件：** `src/mycode/agent/__init__.py`, `src/mycode/agent/config.py`, `src/mycode/agent/events.py`, `tests/test_agent_runner.py`
-
-**依赖：** T1
-
-**步骤：**
-
-1. 定义 `AgentMode`，支持 `default`、`plan`、`do`。
-2. 定义 `AgentConfig`，包含 `max_iterations` 和 `max_unknown_tool_calls`。
-3. 定义 `AgentRequest`。
-4. 定义 `AgentStopReason`。
-5. 定义 `AgentEvent`，支持文本、工具开始、工具结果、token usage、进度、done、error。
-6. 提供 `progress_event()` 和 `done_event()` 辅助构造函数。
-7. 在 `__init__.py` 中导出核心 Agent 类型。
-
-**验证：** 运行 `.venv/bin/python -m compileall src/mycode/agent`，期望无语法错误。
-
-## T3: 实现取消信号
-
-**文件：** `src/mycode/agent/cancellation.py`, `tests/test_agent_executor.py`, `tests/test_agent_runner.py`
-
-**依赖：** T2
-
-**步骤：**
-
-1. 实现 `CancellationToken.cancel()`。
-2. 实现 `CancellationToken.is_cancelled()`。
-3. 保证重复取消是幂等操作。
-4. 编写取消 token 基础行为测试。
-
-**验证：** 运行 `pytest tests/test_agent_executor.py -k cancellation`，期望通过。
-
-## T4: 实现流式双路收集器
-
-**文件：** `src/mycode/agent/collector.py`, `tests/test_agent_collector.py`
-
-**依赖：** T1, T2
-
-**步骤：**
-
-1. 实现 `CollectedResponse`。
-2. 实现 `StreamCollector.collect()`。
-3. 收到 `text_delta` 时立即产出 `AgentEvent(type="text_delta")`，同时累计完整文本。
-4. 收到 `tool_call_delta` 时按 tool call id 拼接 JSON 参数碎片。
-5. 收到 `tool_call_done` 时解析完整参数并生成 `ToolCall`。
-6. 参数 JSON 非法时生成 `parse_errors`。
-7. 收到 `token_usage` 时产出 `AgentEvent(type="token_usage")` 并记录用量。
-8. 收到 `message_done` 时产出最终 `CollectedResponse`。
-9. 编写实时文本转发、完整文本收集、单工具参数拼接、多工具拼接、非法 JSON、token usage 测试。
-
-**验证：** 运行 `pytest tests/test_agent_collector.py`，期望全部通过。
-
-## T5: 实现工具安全分类和 Plan Mode 工具集合
-
-**文件：** `src/mycode/agent/tools.py`, `tests/test_agent_tools.py`
-
-**依赖：** T2
-
-**步骤：**
-
-1. 定义 `ToolSafety`。
-2. 定义 `ToolBatch`。
-3. 实现 `classify_tool(name)`。
-4. 将 `read_file`、`find_files`、`search_code` 分类为 `read`。
-5. 将 `write_file`、`edit_file`、`run_command` 分类为 `side_effect`。
-6. 实现 `create_readonly_registry(full_registry)`，只包含读类工具。
-7. 实现 `ToolBatcher.batch(calls)`，按相邻安全等级分批。
-8. 编写分类、只读工具集合、混合工具分批、未知工具分类测试。
-
-**验证：** 运行 `pytest tests/test_agent_tools.py`，期望全部通过。
-
-## T6: 实现批量工具执行器
-
-**文件：** `src/mycode/agent/executor.py`, `tests/test_agent_executor.py`
-
-**依赖：** T3, T5
-
-**步骤：**
-
-1. 实现 `BatchToolExecutor`。
-2. 接收 `ToolRegistry`、`ToolContext` 和批次列表。
-3. 对每个工具调用产出 `tool_call_started` 事件。
-4. 对每个工具结果产出 `tool_result` 事件。
-5. 对 `read` 批次使用线程池并发执行。
-6. 对 `side_effect` 批次按原顺序串行执行。
-7. 保留每个结果与原 `tool_call_id` 的映射。
-8. 在每个批次前后检查取消信号。
-9. 取消后停止后续批次执行并产出取消相关事件。
-10. 编写读批次并发、写批次串行、混合批次顺序、未知工具结果、取消测试。
-
-**验证：** 运行 `pytest tests/test_agent_executor.py`，期望全部通过。
-
-## T7: 实现 AgentRunner 正常循环
-
-**文件：** `src/mycode/agent/runner.py`, `tests/test_agent_runner.py`
-
-**依赖：** T4, T5, T6
-
-**步骤：**
-
-1. 实现 `AgentRunner.__init__()`。
-2. 保存 Provider、完整工具注册中心、工具上下文、AgentConfig 和消息历史。
-3. 实现普通 `default` 模式工具集合选择。
-4. 每轮循环发出 `progress` 事件，包含当前迭代和最大迭代。
-5. 调用 Provider 并通过 `StreamCollector` 转换事件。
-6. 无工具调用时追加 assistant 消息，发出 `done(completed)` 并停止。
-7. 有工具调用时调用 `ToolBatcher` 和 `BatchToolExecutor`。
-8. 将 assistant tool_calls 和 tool result 消息按 ID 追加到历史。
-9. 下一轮继续调用 Provider。
-10. 编写多轮工具调用后正常完成测试。
-
-**验证：** 运行 `pytest tests/test_agent_runner.py -k completed`，期望通过。
-
-## T8: 实现停止条件
-
-**文件：** `src/mycode/agent/runner.py`, `tests/test_agent_runner.py`
-
-**依赖：** T7
-
-**步骤：**
-
-1. 实现最大迭代次数停止。
-2. 实现取消停止。
-3. 实现连续未知工具停止。
-4. 实现 Provider 流式错误停止。
-5. 实现工具参数解析错误停止。
-6. 每种停止都产出结构化 `done` 或 `error` 事件，带 `stop_reason`。
-7. 编写 `max_iterations`、`cancelled`、`unknown_tools`、`stream_error`、`tool_parse_error` 测试。
-
-**验证：** 运行 `pytest tests/test_agent_runner.py -k "max_iterations or cancelled or unknown_tools or stream_error or tool_parse_error"`，期望通过。
-
-## T9: 实现 Plan Mode 和 Do Mode
-
-**文件：** `src/mycode/agent/runner.py`, `src/mycode/agent/tools.py`, `tests/test_agent_runner.py`, `tests/test_agent_tools.py`
-
-**依赖：** T7, T8
-
-**步骤：**
-
-1. `AgentRunner` 根据 `AgentRequest.mode` 选择工具集合。
-2. `plan` 模式使用只读工具注册中心。
-3. `do` 模式使用完整工具注册中心。
-4. `default` 模式使用完整工具注册中心。
-5. `/plan` 阶段如果模型请求副作用工具，应被视为未知或不可用工具结果。
-6. 编写 `plan` 模式工具限制测试。
-7. 编写 `plan` 模式能输出计划文本测试。
-8. 编写 `do` 模式能使用副作用工具测试。
-9. 编写普通输入默认完整工具集合测试。
-
-**验证：** 运行 `pytest tests/test_agent_runner.py -k "plan or do or default"`，期望通过。
-
-## T10: Provider Token 用量事件解析
-
-**文件：** `src/mycode/providers/openai.py`, `src/mycode/providers/anthropic.py`, `tests/test_providers.py`
+**文件：** `src/mycode/prompts/__init__.py`, `src/mycode/prompts/modules.py`, `tests/test_prompts.py`
 
 **依赖：** T1
 
 **步骤：**
 
-1. OpenAI-compatible 流中出现 usage 字段时产出 `StreamEvent(type="token_usage")`。
-2. DeepSeek 继续复用 OpenAI-compatible 行为。
-3. Anthropic 流中出现 usage 字段时产出 `StreamEvent(type="token_usage")`。
-4. 未出现 usage 时不产出 token usage 事件。
-5. 编写 OpenAI usage、DeepSeek usage、Anthropic usage 测试。
+1. 定义 `PromptModule` 和 `PromptOptions`。
+2. 实现 `fixed_prompt_modules()`，按身份、系统约束、任务模式、动作执行、工具使用、语气风格、文本输出的顺序返回七个固定模块。
+3. 在固定模块中写入关键规则：优先专用工具、编辑前读取或搜索、工作区边界、安全约束、输出风格。
+4. 实现 `optional_prompt_modules(options)`，按自定义指令、已激活 Skill、长期记忆顺序返回非空模块。
+5. 编写模块顺序、固定模块数量、可选模块追加顺序、关键规则存在性测试。
 
-**验证：** 运行 `pytest tests/test_providers.py -k usage`，期望通过。
+**验证：** 运行 `PYTHONPATH=src .venv/bin/python -m pytest tests/test_prompts.py -k modules`，期望全部通过。
 
-## T11: CLI 切换到 AgentRunner
+## T3: 实现模式动态指令
+
+**文件：** `src/mycode/prompts/modes.py`, `src/mycode/agent/config.py`, `tests/test_prompts.py`
+
+**依赖：** T2
+
+**步骤：**
+
+1. 定义 `DynamicInstruction`。
+2. 实现 `mode_instruction(mode, iteration, repeat_interval)`。
+3. 实现首轮完整、间隔轮完整、其他轮精简的注入策略。
+4. 为 Plan Mode 完整指令写入只读、只计划、不写文件、不改文件、不执行命令规则。
+5. 为 Do/default 完整指令写入完整工具集、编辑前观察、专用工具优先规则。
+6. 在 `AgentConfig` 增加默认重复间隔，建议默认值为 `3`。
+7. 编写 Plan/Do/default 的完整与精简指令测试。
+
+**验证：** 运行 `PYTHONPATH=src .venv/bin/python -m pytest tests/test_prompts.py -k modes`，期望全部通过。
+
+## T4: 实现 PromptBuilder
+
+**文件：** `src/mycode/prompts/builder.py`, `src/mycode/prompts/__init__.py`, `tests/test_prompts.py`
+
+**依赖：** T2, T3
+
+**步骤：**
+
+1. 定义 `EnvironmentInfo` 和 `PromptBundle`。
+2. 实现 `PromptBuilder.build(mode, iteration, environment, options)`。
+3. 将七个固定模块渲染到 `stable_system_prompt`，模块之间用稳定分隔。
+4. 将环境信息渲染为 `<mewcode_environment>...</mewcode_environment>`。
+5. 将模式规则渲染为 `<mewcode_runtime_instruction>...</mewcode_runtime_instruction>`。
+6. 将可选模块渲染到 `optional_system_prompt`，并保持默认空值。
+7. 测试 `stable_system_prompt` 不包含 cwd、日期、用户输入、迭代次数等动态内容。
+8. 测试环境变化不改变稳定提示文本。
+
+**验证：** 运行 `PYTHONPATH=src .venv/bin/python -m pytest tests/test_prompts.py`，期望全部通过。
+
+## T5: 实现工具描述强化
+
+**文件：** `src/mycode/tools/descriptions.py`, `tests/test_tool_descriptions.py`
+
+**依赖：** T1
+
+**步骤：**
+
+1. 实现 `reinforce_tool_spec(spec)`，返回新的 `ToolSpec`，保留 name 和 parameters 不变。
+2. 实现 `reinforce_tool_specs(specs)`。
+3. 为 `read_file`、`find_files`、`search_code` 描述追加专用工具优先规则。
+4. 为 `edit_file` 描述追加编辑前必须读取或搜索确认的规则。
+5. 为文件和命令相关工具描述追加工作区边界规则。
+6. 编写描述强化、schema 不变、关键规则存在性测试。
+
+**验证：** 运行 `PYTHONPATH=src .venv/bin/python -m pytest tests/test_tool_descriptions.py`，期望全部通过。
+
+## T6: 迁移 OpenAI-compatible Provider
+
+**文件：** `src/mycode/providers/openai.py`, `src/mycode/providers/deepseek.py`, `tests/test_providers.py`
+
+**依赖：** T1, T4, T5
+
+**步骤：**
+
+1. 将 `OpenAIProvider.stream_chat` 入参改为 `ChatRequest`。
+2. 增加 payload 构建 helper，把稳定系统提示、环境动态消息、可选系统提示、模式动态消息、普通历史按顺序转为 `messages`。
+3. 工具列表使用 `ChatRequest.tools` 转换为 OpenAI-compatible `tools`。
+4. 对支持字段的情况预留稳定内容缓存标记，默认保持兼容不破坏普通 OpenAI-compatible 服务。
+5. 从 `usage.prompt_tokens_details.cached_tokens` 解析 `cache_read_tokens`。
+6. 兼容 `cache_creation_input_tokens`、`cache_read_input_tokens` 等等价字段。
+7. 未返回缓存字段时设置 `cache_unavailable=True`。
+8. 确认 `DeepSeekProvider` 继续继承或复用该行为。
+9. 编写系统消息顺序、工具转换、缓存字段解析、无缓存字段降级测试。
+
+**验证：** 运行 `PYTHONPATH=src .venv/bin/python -m pytest tests/test_providers.py -k "openai or deepseek or usage or cache"`，期望全部通过。
+
+## T7: 迁移 Anthropic Provider
+
+**文件：** `src/mycode/providers/anthropic.py`, `tests/test_providers.py`
+
+**依赖：** T1, T4, T5
+
+**步骤：**
+
+1. 将 `AnthropicProvider.stream_chat` 和 `_build_payload` 入参改为 `ChatRequest`。
+2. 将稳定系统提示转为顶层 `system` content block，并添加 `cache_control: {"type": "ephemeral"}`。
+3. 将环境动态消息、可选系统提示和模式动态消息按优先级追加为非缓存 system blocks。
+4. 工具定义在支持时添加缓存控制，工具参数 schema 保持不变。
+5. 保持现有 assistant tool use 和 tool result 转换逻辑。
+6. 从 `usage.cache_read_input_tokens` 和 `usage.cache_creation_input_tokens` 解析统一缓存字段。
+7. 未返回缓存字段时设置 `cache_unavailable=True`。
+8. 编写 Anthropic system block 顺序、cache_control、工具定义、缓存字段解析测试。
+
+**验证：** 运行 `PYTHONPATH=src .venv/bin/python -m pytest tests/test_providers.py -k "anthropic or cache"`，期望全部通过。
+
+## T8: AgentRunner 接入结构化提示
+
+**文件：** `src/mycode/agent/runner.py`, `tests/test_agent_runner.py`
+
+**依赖：** T4, T5, T6, T7
+
+**步骤：**
+
+1. 在每轮模型调用前构造 `EnvironmentInfo`。
+2. 使用 `PromptBuilder` 生成 `PromptBundle`。
+3. 根据当前模式选择只读或完整工具注册中心。
+4. 对当前工具列表调用 `reinforce_tool_specs`。
+5. 构造 `ChatRequest` 并调用 Provider。
+6. 删除或停用把 Plan/Do 模式说明拼接到用户文本的逻辑。
+7. 确保用户消息历史只保存原始用户输入。
+8. 编写默认模式、Plan Mode、Do Mode 的 `ChatRequest` 断言测试。
+9. 编写 Plan Mode 首轮完整、间隔轮完整、其他轮精简的注入测试。
+10. 保持现有 Agent Loop 完成、工具回写、停止条件测试通过。
+
+**验证：** 运行 `PYTHONPATH=src .venv/bin/python -m pytest tests/test_agent_runner.py`，期望全部通过。
+
+## T9: CLI 展示缓存用量
 
 **文件：** `src/mycode/cli.py`, `tests/test_cli.py`
 
-**依赖：** T7, T8, T9
+**依赖：** T1, T8
 
 **步骤：**
 
-1. CLI 启动时创建 `AgentRunner`。
-2. 普通输入解析为 `AgentRequest(mode="default")`。
-3. `/plan ...` 解析为 `AgentRequest(mode="plan")`。
-4. `/do ...` 解析为 `AgentRequest(mode="do")`。
-5. CLI 捕获 Ctrl+C 时触发 `CancellationToken.cancel()`。
-6. CLI 消费 `AgentEvent(type="text_delta")` 并实时打印文本。
-7. CLI 消费 `progress` 事件并简短展示迭代进度。
-8. CLI 消费 `tool_call_started` 和 `tool_result` 事件并展示工具状态。
-9. CLI 消费 `done` 和 `error` 事件并展示停止原因。
-10. 保持退出命令、配置错误、Provider 错误展示行为。
-11. 编写普通输入、`/plan`、`/do`、工具事件展示、停止原因展示、退出命令回归测试。
+1. 扩展 `format_token_usage()`，展示 `cache_read` 和 `cache_create`。
+2. 当 `cache_unavailable=True` 且没有缓存 token 字段时展示 `cache=unavailable` 或等价文本。
+3. 保持 input、output、total 展示兼容。
+4. 编写缓存读取、缓存创建、缓存不可验证、普通 token usage 展示测试。
 
-**验证：** 运行 `pytest tests/test_cli.py`，期望全部通过。
+**验证：** 运行 `PYTHONPATH=src .venv/bin/python -m pytest tests/test_cli.py -k usage`，期望全部通过。
 
-## T12: 兼容层和旧测试回归
+## T10: 编写人工对比场景文档
 
-**文件：** `src/mycode/session.py`, `tests/test_session.py`, `tests/test_session_tools.py`
+**文件：** `docs/manual-eval-structured-prompts.md`
 
-**依赖：** T11
+**依赖：** T4, T5, T8
 
 **步骤：**
 
-1. 明确 `ChatSession` 是兼容层还是委托 `AgentRunner`。
-2. 保持已有 `tests/test_session.py` 通过。
-3. 根据新 AgentRunner 行为调整或保留 `tests/test_session_tools.py`。
-4. 确保旧的一轮工具回灌测试不与新默认 Agent Loop 语义冲突。
+1. 记录“读取后编辑”场景，观察是否先读或搜再编辑。
+2. 记录 “Plan Mode 只读”场景，观察只读工具集合和动态指令。
+3. 记录“专用工具优先”场景，观察找文件、读文件、搜代码是否使用对应工具。
+4. 记录“环境变化缓存稳定”场景，观察稳定提示不随环境变化。
+5. 记录“多轮动态注入”场景，观察完整/精简规则频率。
+6. 为每个场景写明输入、预期观察点和通过标准。
 
-**验证：** 运行 `pytest tests/test_session.py tests/test_session_tools.py`，期望全部通过。
+**验证：** 人工阅读 `docs/manual-eval-structured-prompts.md`，确认五个场景均包含输入、观察点和通过标准。
 
-## T13: 更新文档说明
+## T11: Provider 和 Agent 回归收敛
 
-**文件：** `README.md`
+**文件：** `tests/test_providers.py`, `tests/test_agent_runner.py`, `tests/test_tool_streaming.py`, `tests/test_session_tools.py`
 
-**依赖：** T11
-
-**步骤：**
-
-1. 增加 Agent Loop 能力说明。
-2. 说明默认输入会进入多轮 Agent Loop。
-3. 说明停止条件：完成、迭代上限、取消、未知工具、流错误。
-4. 说明 `/plan` 只开放读类工具。
-5. 说明 `/do` 使用完整工具集合。
-6. 明确本阶段仍不做权限系统、上下文压缩、交互式确认和复杂 TUI。
-7. 补充 Agent Loop 测试命令。
-
-**验证：** 阅读 `README.md`，确认范围边界与 `spec.md` 一致。
-
-## T14: 全量验证
-
-**文件：** `src/mycode/**`, `tests/**`
-
-**依赖：** T1-T13
+**依赖：** T6, T7, T8
 
 **步骤：**
 
-1. 运行 Python 语法检查。
-2. 运行新增 Agent 测试。
-3. 运行现有工具系统测试。
-4. 运行 Provider、Session、CLI 回归测试。
-5. 运行全量 `pytest`。
-6. 搜索错误项目名。
-7. 搜索明显真实 API Key 模式。
-8. 修复本阶段引入的失败后重跑相关验证。
+1. 更新所有 fake Provider 到 `ChatRequest` 协议。
+2. 更新断言，使用 `request.messages` 和 `request.tools` 检查历史与工具列表。
+3. 确保旧的工具流解析、工具结果回写和会话工具测试仍覆盖原行为。
+4. 对因接口升级失效的测试做最小必要调整，不改变被测行为。
 
-**验证：** 运行 `PYTHONPYCACHEPREFIX=.pycache .venv/bin/python -m compileall src tests` 和 `PYTHONPYCACHEPREFIX=.pycache .venv/bin/python -m pytest`，期望全部通过；项目名和 API Key 扫描无新增问题。
+**验证：** 运行 `PYTHONPATH=src .venv/bin/python -m pytest tests/test_providers.py tests/test_agent_runner.py tests/test_tool_streaming.py tests/test_session_tools.py`，期望全部通过。
+
+## T12: 全量测试和文档一致性检查
+
+**文件：** `README.md`, `spec.md`, `plan.md`, `task.md`
+
+**依赖：** T1-T11
+
+**步骤：**
+
+1. 检查 README 是否需要补充结构化系统提示、缓存观测或 Plan/Do 注入行为说明。
+2. 如 README 已有行为描述仍准确，则不做无关改动。
+3. 检查 `spec.md`、`plan.md`、`task.md` 与实际实现术语一致。
+4. 运行全量测试。
+
+**验证：** 运行 `PYTHONPATH=src .venv/bin/python -m pytest`，期望全部通过。
 
 ## 执行顺序
 
 ```text
-T1
-→ T2
-→ T3
-→ T4
-→ T5
-→ T6
-→ T7
-→ T8
-→ T9
-→ T10
-→ T11
-→ T12
-→ T13
-→ T14
+T1 -> T2 -> T3 -> T4 -> T5 -> T6 -> T7 -> T8 -> T9 -> T10 -> T11 -> T12
 ```

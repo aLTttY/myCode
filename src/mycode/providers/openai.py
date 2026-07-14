@@ -1,10 +1,11 @@
 from __future__ import annotations
 
 import json
-from collections.abc import Iterator, Sequence
+from collections.abc import Iterator
 
 import httpx
 
+from mycode.providers.base import ChatRequest
 from mycode.providers.sse import iter_sse_data_lines
 from mycode.types import AppConfig, Message, ProviderError, StreamEvent, TokenUsage, ToolCall, ToolSpec
 
@@ -15,16 +16,9 @@ class OpenAIProvider:
 
     def stream_chat(
         self,
-        messages: Sequence[Message],
-        tools: Sequence[ToolSpec] = (),
+        request: ChatRequest,
     ) -> Iterator[StreamEvent]:
-        payload: dict[str, object] = {
-            "model": self.config.model,
-            "messages": [self._convert_message(message) for message in messages],
-            "stream": True,
-        }
-        if tools:
-            payload["tools"] = [_openai_tool(tool) for tool in tools]
+        payload = self._build_payload(request)
         headers = {
             "Authorization": f"Bearer {self.config.api_key}",
             "Content-Type": "application/json",
@@ -40,6 +34,29 @@ class OpenAIProvider:
             raise
         except httpx.HTTPError as exc:
             raise ProviderError("调用模型 API 时发生网络错误。") from exc
+
+    def _build_payload(self, request: ChatRequest) -> dict[str, object]:
+        payload: dict[str, object] = {
+            "model": self.config.model,
+            "messages": self._system_messages(request) + [self._convert_message(message) for message in request.messages],
+            "stream": True,
+        }
+        if request.tools:
+            payload["tools"] = [_openai_tool(tool) for tool in request.tools]
+        return payload
+
+    def _system_messages(self, request: ChatRequest) -> list[dict[str, object]]:
+        messages: list[dict[str, object]] = []
+        if request.stable_system_prompt:
+            messages.append({"role": "system", "content": request.stable_system_prompt})
+        dynamic_messages = list(request.dynamic_system_messages)
+        if dynamic_messages:
+            messages.append({"role": "system", "content": dynamic_messages[0].render()})
+            dynamic_messages = dynamic_messages[1:]
+        if request.optional_system_prompt:
+            messages.append({"role": "system", "content": request.optional_system_prompt})
+        messages.extend({"role": "system", "content": instruction.render()} for instruction in dynamic_messages)
+        return messages
 
     def _convert_message(self, message: Message) -> dict[str, object]:
         if message.role == "tool":
@@ -137,8 +154,31 @@ def _token_usage(usage: dict[str, object]) -> TokenUsage:
     input_tokens = usage.get("prompt_tokens")
     output_tokens = usage.get("completion_tokens")
     total_tokens = usage.get("total_tokens")
+    prompt_details = usage.get("prompt_tokens_details")
+    detail_cached_tokens = None
+    if isinstance(prompt_details, dict):
+        detail_cached_tokens = prompt_details.get("cached_tokens")
+    cache_read_tokens = _first_int(
+        usage.get("cache_read_input_tokens"),
+        usage.get("cached_tokens"),
+        detail_cached_tokens,
+    )
+    cache_creation_tokens = _first_int(
+        usage.get("cache_creation_input_tokens"),
+        usage.get("cache_creation_tokens"),
+    )
     return TokenUsage(
         input_tokens=input_tokens if isinstance(input_tokens, int) else None,
         output_tokens=output_tokens if isinstance(output_tokens, int) else None,
         total_tokens=total_tokens if isinstance(total_tokens, int) else None,
+        cache_read_tokens=cache_read_tokens,
+        cache_creation_tokens=cache_creation_tokens,
+        cache_unavailable=cache_read_tokens is None and cache_creation_tokens is None,
     )
+
+
+def _first_int(*values: object) -> int | None:
+    for value in values:
+        if isinstance(value, int):
+            return value
+    return None

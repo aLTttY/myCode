@@ -1,91 +1,82 @@
-# myCode Agent Loop Checklist
+# Structured System Prompt Checklist
 
 > 每一项通过运行代码或观察行为来验证，聚焦系统行为。
 
 ## 实现完整性
 
-- [ ] Agent 能在一次用户请求中执行多轮“模型响应 → 工具执行 → 结果回写 → 再次模型响应”。（验证：运行 `pytest tests/test_agent_runner.py -k completed`）
-- [ ] 模型不再请求工具时，Agent 正常停止并输出最终文本。（验证：运行 `pytest tests/test_agent_runner.py -k completed`）
-- [ ] 达到最大迭代次数时，Agent 停止并产生 `max_iterations` 停止原因。（验证：运行 `pytest tests/test_agent_runner.py -k max_iterations`）
-- [ ] 用户取消时，Agent 停止后不再继续调用模型或工具，并产生 `cancelled` 事件。（验证：运行 `pytest tests/test_agent_runner.py tests/test_agent_executor.py -k cancelled`）
-- [ ] 连续未知工具调用达到阈值时，Agent 停止并说明未知工具。（验证：运行 `pytest tests/test_agent_runner.py -k unknown_tools`）
-- [ ] Provider 流式错误会停止 Agent 并产生 `stream_error`。（验证：运行 `pytest tests/test_agent_runner.py -k stream_error`）
-- [ ] 工具调用参数解析错误会停止 Agent 或回写结构化错误，并产生 `tool_parse_error`。（验证：运行 `pytest tests/test_agent_runner.py tests/test_agent_collector.py -k "tool_parse_error or invalid"`）
+- [ ] 结构化全局指令包含七个固定模块，顺序为身份、系统约束、任务模式、动作执行、工具使用、语气风格、文本输出。（验证：运行 `PYTHONPATH=src .venv/bin/python -m pytest tests/test_prompts.py -k modules`）
+- [ ] 环境信息作为动态系统内容注入，改变 cwd、日期或运行模式不会改变稳定提示文本。（验证：运行 `PYTHONPATH=src .venv/bin/python -m pytest tests/test_prompts.py -k environment`）
+- [ ] 自定义指令、已激活 Skill、长期记忆有明确可选模块位置，且不影响七个固定模块顺序。（验证：运行 `PYTHONPATH=src .venv/bin/python -m pytest tests/test_prompts.py -k optional`）
+- [ ] 生成的提示文本有稳定分隔，快照或顺序测试能检测模块顺序和内容变化。（验证：运行 `PYTHONPATH=src .venv/bin/python -m pytest tests/test_prompts.py -k render`）
+- [ ] 稳定系统提示不包含 cwd、日期、用户输入、对话历史或当前迭代次数。（验证：运行 `PYTHONPATH=src .venv/bin/python -m pytest tests/test_prompts.py -k stable`）
 
-## 事件流
+## 动态注入
 
-- [ ] Agent 对外输出统一 `AgentEvent`，CLI 不直接消费 Provider `StreamEvent`。（验证：运行 `pytest tests/test_cli.py tests/test_agent_runner.py`，并 review CLI 只处理 `AgentEvent`）
-- [ ] 文本增量能实时作为 `text_delta` 事件发出。（验证：运行 `pytest tests/test_agent_collector.py -k text`）
-- [ ] StreamCollector 同时累计完整 assistant 文本用于循环判断。（验证：运行 `pytest tests/test_agent_collector.py -k collected`）
-- [ ] 工具调用开始事件包含工具名和 tool call id。（验证：运行 `pytest tests/test_agent_executor.py -k started`）
-- [ ] 工具结果事件包含工具结果和 tool call id。（验证：运行 `pytest tests/test_agent_executor.py -k result`）
-- [ ] Token 用量事件可从 Provider 事件转发到 Agent 事件；无用量时允许缺省。（验证：运行 `pytest tests/test_providers.py tests/test_agent_collector.py -k usage`）
-- [ ] 每轮循环都会产生进度事件，包含当前迭代和最大迭代。（验证：运行 `pytest tests/test_agent_runner.py -k progress`）
-- [ ] done/error 事件包含结构化停止原因。（验证：运行 `pytest tests/test_agent_runner.py -k stop_reason`）
+- [ ] 运行时动态补充指令带 `<mewcode_runtime_instruction>` 或等价特殊标签，并以系统级内容发送。（验证：运行 `PYTHONPATH=src .venv/bin/python -m pytest tests/test_prompts.py tests/test_agent_runner.py -k runtime_instruction`）
+- [ ] 环境信息带 `<mewcode_environment>` 或等价特殊标签，并以系统级内容发送。（验证：运行 `PYTHONPATH=src .venv/bin/python -m pytest tests/test_prompts.py tests/test_agent_runner.py -k environment`）
+- [ ] Plan Mode 请求不再把模式说明拼接进用户文本，用户消息只包含原始任务正文。（验证：运行 `PYTHONPATH=src .venv/bin/python -m pytest tests/test_agent_runner.py -k plan`）
+- [ ] Plan Mode 首轮注入完整规则，间隔轮次重复完整规则，其余轮次注入精简提醒。（验证：运行 `PYTHONPATH=src .venv/bin/python -m pytest tests/test_prompts.py tests/test_agent_runner.py -k "plan and instruction"`）
+- [ ] Plan Mode 动态指令明确只允许观察、分析和产出计划，不允许写文件、改文件或执行命令。（验证：运行 `PYTHONPATH=src .venv/bin/python -m pytest tests/test_prompts.py -k plan`）
+- [ ] Do Mode 和默认模式动态指令明确允许在全局规则、安全边界和工具约定下使用完整工具集。（验证：运行 `PYTHONPATH=src .venv/bin/python -m pytest tests/test_prompts.py tests/test_agent_runner.py -k "do or default"`）
 
-## 多工具执行
+## 工具规则
 
-- [ ] Agent 能识别一次模型响应中的多个工具调用。（验证：运行 `pytest tests/test_agent_collector.py -k multiple`）
-- [ ] `read_file`、`find_files`、`search_code` 被分类为读类工具。（验证：运行 `pytest tests/test_agent_tools.py -k classify`）
-- [ ] `write_file`、`edit_file`、`run_command` 被分类为有副作用工具。（验证：运行 `pytest tests/test_agent_tools.py -k classify`）
-- [ ] 多个读类工具调用可以并发执行，并正确回写每个结果。（验证：运行 `pytest tests/test_agent_executor.py -k concurrent`）
-- [ ] 多个有副作用工具调用按原顺序串行执行。（验证：运行 `pytest tests/test_agent_executor.py -k serial`）
-- [ ] 混合工具调用会按安全性分批，读类和副作用批次不会无序交叉。（验证：运行 `pytest tests/test_agent_tools.py tests/test_agent_executor.py -k batch`）
-- [ ] 工具结果按对应 tool call id 写入历史，下一轮模型能看到全部结果。（验证：运行 `pytest tests/test_agent_runner.py -k history`）
+- [ ] 工具描述中能观察到专用工具优先规则，例如读文件、找文件、搜索代码和编辑文件分别使用对应工具。（验证：运行 `PYTHONPATH=src .venv/bin/python -m pytest tests/test_tool_descriptions.py -k dedicated`）
+- [ ] 全局指令中能观察到专用工具优先规则。（验证：运行 `PYTHONPATH=src .venv/bin/python -m pytest tests/test_prompts.py -k tool`）
+- [ ] 工具描述和全局指令中都能观察到编辑前必须读取或搜索确认当前内容的规则。（验证：运行 `PYTHONPATH=src .venv/bin/python -m pytest tests/test_prompts.py tests/test_tool_descriptions.py -k "edit or read"`）
+- [ ] 工具描述和全局指令中都能观察到工作区边界和安全规则。（验证：运行 `PYTHONPATH=src .venv/bin/python -m pytest tests/test_prompts.py tests/test_tool_descriptions.py -k workspace`）
+- [ ] 工具描述强化不改变工具 name 和参数 schema。（验证：运行 `PYTHONPATH=src .venv/bin/python -m pytest tests/test_tool_descriptions.py -k schema`）
 
-## Plan 与 Do Mode
+## Provider 集成
 
-- [ ] `/plan` 被解析为 `AgentRequest(mode="plan")`。（验证：运行 `pytest tests/test_cli.py -k plan`）
-- [ ] `/plan` 模式只开放 `read_file`、`find_files`、`search_code`。（验证：运行 `pytest tests/test_agent_tools.py tests/test_agent_runner.py -k plan`）
-- [ ] `/plan` 模式下写文件、改文件、执行命令不会被开放给模型。（验证：运行 `pytest tests/test_agent_runner.py -k plan`）
-- [ ] `/plan` 模式能基于读类工具结果输出计划文本。（验证：运行 `pytest tests/test_agent_runner.py -k plan`）
-- [ ] `/do` 被解析为 `AgentRequest(mode="do")`。（验证：运行 `pytest tests/test_cli.py -k do`）
-- [ ] `/do` 模式使用完整工具集合，可执行副作用工具。（验证：运行 `pytest tests/test_agent_runner.py -k do`）
-- [ ] 普通输入默认进入完整 Agent Loop。（验证：运行 `pytest tests/test_cli.py tests/test_agent_runner.py -k default`）
+- [ ] Provider 请求中稳定全局指令、环境信息、可选模块、模式补充消息、对话历史和工具描述保持结构化分离。（验证：运行 `PYTHONPATH=src .venv/bin/python -m pytest tests/test_providers.py tests/test_agent_runner.py -k chat_request`）
+- [ ] OpenAI-compatible payload 按顺序发送稳定 system 消息、环境 system 消息、可选 system 消息、模式 system 消息和普通历史。（验证：运行 `PYTHONPATH=src .venv/bin/python -m pytest tests/test_providers.py -k openai`）
+- [ ] Anthropic payload 使用顶层 system content blocks 表达稳定提示、环境信息、可选模块和动态指令。（验证：运行 `PYTHONPATH=src .venv/bin/python -m pytest tests/test_providers.py -k anthropic`）
+- [ ] 支持缓存控制的 Provider 请求包含稳定提示或工具描述的缓存标记或等价结构。（验证：运行 `PYTHONPATH=src .venv/bin/python -m pytest tests/test_providers.py -k cache_control`）
+- [ ] 不支持缓存控制或未返回缓存字段的 Provider 能正常完成请求，并产生缓存不可验证的可观察信息。（验证：运行 `PYTHONPATH=src .venv/bin/python -m pytest tests/test_providers.py tests/test_cli.py -k "cache_unavailable or usage"`）
+- [ ] API 返回缓存命中字段时，myCode 能解析缓存读取和缓存创建 token。（验证：运行 `PYTHONPATH=src .venv/bin/python -m pytest tests/test_providers.py -k cache`）
+- [ ] 缓存读取、缓存创建或缓存不可验证信息能通过 token 用量事件或 CLI 输出观察到。（验证：运行 `PYTHONPATH=src .venv/bin/python -m pytest tests/test_cli.py -k usage`）
 
-## CLI 行为
+## Agent 与 CLI 回归
 
-- [ ] CLI 创建 `AgentRunner` 而不是直接驱动 `ChatSession` 工具闭环。（验证：运行 `pytest tests/test_cli.py`，并 review CLI 构造路径）
-- [ ] CLI 能展示文本增量事件。（验证：运行 `pytest tests/test_cli.py -k streaming`）
-- [ ] CLI 能展示迭代进度事件。（验证：运行 `pytest tests/test_cli.py -k progress`）
-- [ ] CLI 能展示工具开始和工具结果事件。（验证：运行 `pytest tests/test_cli.py -k tool`）
-- [ ] CLI 能展示完成、迭代上限、取消、未知工具和流错误等停止原因。（验证：运行 `pytest tests/test_cli.py -k stop`）
-- [ ] CLI 退出命令、配置错误和 Provider 错误展示保持可用。（验证：运行 `pytest tests/test_cli.py`）
+- [ ] AgentRunner 每轮调用 Provider 时传入 `ChatRequest`，并使用强化后的当前模式工具描述。（验证：运行 `PYTHONPATH=src .venv/bin/python -m pytest tests/test_agent_runner.py -k chat_request`）
+- [ ] Plan Mode 只开放 `read_file`、`find_files`、`search_code`，写文件、改文件和执行命令不会开放给模型。（验证：运行 `PYTHONPATH=src .venv/bin/python -m pytest tests/test_agent_runner.py -k plan`）
+- [ ] Do Mode 和默认模式仍开放完整工具集。（验证：运行 `PYTHONPATH=src .venv/bin/python -m pytest tests/test_agent_runner.py -k "do or default"`）
+- [ ] 普通无工具聊天仍保持流式输出。（验证：运行 `PYTHONPATH=src .venv/bin/python -m pytest tests/test_agent_runner.py tests/test_cli.py -k "plain or text_delta"`）
+- [ ] 现有 Agent Loop 工具调用和工具结果回写仍可正常运行。（验证：运行 `PYTHONPATH=src .venv/bin/python -m pytest tests/test_agent_runner.py tests/test_tool_streaming.py tests/test_session_tools.py`）
+- [ ] CLI 能展示 input、output、total 以及 cache usage 字段，旧格式仍兼容。（验证：运行 `PYTHONPATH=src .venv/bin/python -m pytest tests/test_cli.py -k usage`）
 
-## 回归与边界
+## 人工对比
 
-- [ ] 现有 Provider 文本流和工具调用解析保持可用。（验证：运行 `pytest tests/test_providers.py`）
-- [ ] 现有工具系统测试保持通过。（验证：运行 `pytest tests/test_tools_files.py tests/test_tools_command.py tests/test_tools_search.py tests/test_tools_registry.py tests/test_tool_executor.py`）
-- [ ] 旧 Session 测试保持通过，兼容层语义明确。（验证：运行 `pytest tests/test_session.py tests/test_session_tools.py`）
-- [ ] 没有工具调用的普通聊天仍保持流式输出。（验证：运行 `pytest tests/test_agent_runner.py tests/test_cli.py -k plain`）
-- [ ] README 明确本阶段仍不做权限系统、上下文压缩、交互式确认和复杂 TUI。（验证：阅读 `README.md`）
+- [ ] 人工对比文档覆盖“读取后编辑”场景，包含输入、观察点和通过标准。（验证：阅读 `docs/manual-eval-structured-prompts.md`）
+- [ ] 人工对比文档覆盖“Plan Mode 只读”场景，包含输入、观察点和通过标准。（验证：阅读 `docs/manual-eval-structured-prompts.md`）
+- [ ] 人工对比文档覆盖“专用工具优先”场景，包含输入、观察点和通过标准。（验证：阅读 `docs/manual-eval-structured-prompts.md`）
+- [ ] 人工对比文档覆盖“环境变化缓存稳定”场景，包含输入、观察点和通过标准。（验证：阅读 `docs/manual-eval-structured-prompts.md`）
+- [ ] 人工对比文档覆盖“多轮动态注入”场景，包含输入、观察点和通过标准。（验证：阅读 `docs/manual-eval-structured-prompts.md`）
 
 ## 编译与测试
 
 - [ ] Python 源码语法检查通过。（验证：运行 `PYTHONPYCACHEPREFIX=.pycache .venv/bin/python -m compileall src tests`）
-- [ ] Agent collector 测试通过。（验证：运行 `pytest tests/test_agent_collector.py`）
-- [ ] Agent tools 测试通过。（验证：运行 `pytest tests/test_agent_tools.py`）
-- [ ] Agent executor 测试通过。（验证：运行 `pytest tests/test_agent_executor.py`）
-- [ ] Agent runner 测试通过。（验证：运行 `pytest tests/test_agent_runner.py`）
-- [ ] CLI 测试通过。（验证：运行 `pytest tests/test_cli.py`）
-- [ ] Provider 测试通过。（验证：运行 `pytest tests/test_providers.py`）
-- [ ] 全量自动化测试通过。（验证：运行 `PYTHONPYCACHEPREFIX=.pycache .venv/bin/python -m pytest`）
-- [ ] 项目中没有新增错误项目名。（验证：运行 `rg -n "Mew[C]ode|mew[c]ode"`，人工确认只在历史说明或允许位置出现）
+- [ ] 提示构建测试通过。（验证：运行 `PYTHONPATH=src .venv/bin/python -m pytest tests/test_prompts.py`）
+- [ ] 工具描述强化测试通过。（验证：运行 `PYTHONPATH=src .venv/bin/python -m pytest tests/test_tool_descriptions.py`）
+- [ ] Provider 测试通过。（验证：运行 `PYTHONPATH=src .venv/bin/python -m pytest tests/test_providers.py`）
+- [ ] AgentRunner 测试通过。（验证：运行 `PYTHONPATH=src .venv/bin/python -m pytest tests/test_agent_runner.py`）
+- [ ] CLI 测试通过。（验证：运行 `PYTHONPATH=src .venv/bin/python -m pytest tests/test_cli.py`）
+- [ ] 工具流和会话工具回归测试通过。（验证：运行 `PYTHONPATH=src .venv/bin/python -m pytest tests/test_tool_streaming.py tests/test_session_tools.py`）
+- [ ] 全量自动化测试通过。（验证：运行 `PYTHONPATH=src .venv/bin/python -m pytest`）
 - [ ] 项目中没有提交真实 API Key。（验证：运行 `rg -n "sk-[A-Za-z0-9]"`，期望无匹配）
 
 ## 端到端场景
 
-- [ ] 场景 1：普通输入触发两轮工具调用后完成。（验证：用 fake Provider 运行 AgentRunner，观察两轮 progress、工具结果、最终 done）
-- [ ] 场景 2：模型持续请求工具直到达到迭代上限。（验证：用 fake Provider 运行 AgentRunner，观察 `max_iterations` 停止原因）
-- [ ] 场景 3：用户取消正在运行的 Agent。（验证：触发 CancellationToken，观察 `cancelled` 停止原因且后续工具不再执行）
-- [ ] 场景 4：一次模型响应返回多个读类工具调用。（验证：运行并发批次测试，观察每个结果按 tool call id 回写）
-- [ ] 场景 5：一次模型响应返回多个副作用工具调用。（验证：运行串行批次测试，观察执行顺序与模型请求顺序一致）
-- [ ] 场景 6：`/plan` 查看项目并输出计划，不产生文件修改或命令执行。（验证：用 fake Provider 检查可用工具集合只有读类工具）
-- [ ] 场景 7：`/do` 使用完整工具集合执行实际修改或命令。（验证：用 fake Provider 检查副作用工具可用并能执行）
-- [ ] 场景 8：没有工具调用的普通聊天直接流式输出最终回复。（验证：运行 plain chat 测试）
+- [ ] 场景 1：普通输入无工具调用时直接流式输出最终回复。（验证：运行 plain chat 相关测试，观察 `text_delta` 和 `completed`）
+- [ ] 场景 2：Plan Mode 查看项目并输出计划，不产生文件修改或命令执行能力暴露。（验证：运行 Plan Mode 工具集合测试，观察只读工具列表）
+- [ ] 场景 3：Do Mode 或默认模式请求可使用完整工具集合执行实际任务。（验证：运行 Do/default 工具集合测试，观察副作用工具可用）
+- [ ] 场景 4：多轮工具循环中首轮完整注入，下一轮精简提醒，间隔轮再次完整注入。（验证：用 fake Provider 运行 AgentRunner，观察每轮 `ChatRequest.dynamic_system_messages`）
+- [ ] 场景 5：环境信息变化时稳定系统提示不变，动态环境消息变化。（验证：用不同 `EnvironmentInfo` 调用 `PromptBuilder`，比较 `stable_system_prompt` 和 `environment_message`）
+- [ ] 场景 6：Provider 返回缓存命中字段时，CLI 可观察到缓存读取或创建 token。（验证：用 fake usage 事件运行 Provider/CLI usage 测试）
 
 ## 验收记录要求
 
-- [ ] 每个 checklist 条目执行后记录实际结果，不用“应该可以”代替证据。
+- [ ] 每个 checklist 条目执行后记录实际结果，所有结论都基于命令输出或可观察行为。
 - [ ] 若任一测试失败，先判断是否属于本阶段变更，再修复并重跑相关验证。
 - [ ] 最终验收报告需要列出通过项数量、失败项、修复动作和关键命令输出。

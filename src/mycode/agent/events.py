@@ -32,6 +32,7 @@ class AgentEvent:
     max_iterations: int = 0
     tool_call_id: str = ""
     tool_name: str = ""
+    tool_arguments: dict[str, object] | None = None
     tool_result: ToolResult | None = None
     stop_reason: AgentStopReason | None = None
     message: str = ""

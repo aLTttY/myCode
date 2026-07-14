@@ -1,23 +1,23 @@
-from collections.abc import Iterator, Sequence
+from collections.abc import Iterator
 from pathlib import Path
 
+from mycode.providers.base import ChatRequest
 from mycode.session import ChatSession
 from mycode.tools.registry import create_default_registry
-from mycode.types import Message, StreamEvent, ToolContext, ToolSpec
+from mycode.types import Message, StreamEvent, ToolContext
 
 
 class ScriptedProvider:
     def __init__(self, first: list[StreamEvent], second: list[StreamEvent]) -> None:
         self.first = first
         self.second = second
-        self.calls: list[tuple[tuple[Message, ...], tuple[ToolSpec, ...]]] = []
+        self.calls: list[ChatRequest] = []
 
     def stream_chat(
         self,
-        messages: Sequence[Message],
-        tools: Sequence[ToolSpec] = (),
+        request: ChatRequest,
     ) -> Iterator[StreamEvent]:
-        self.calls.append((tuple(messages), tuple(tools)))
+        self.calls.append(request)
         yield from (self.first if len(self.calls) == 1 else self.second)
 
 
@@ -42,8 +42,8 @@ def test_tool_success_followup_appends_history(tmp_path: Path) -> None:
     assert any(event.type == "tool_started" for event in events)
     assert any(event.type == "tool_finished" and event.tool_result and event.tool_result.ok for event in events)
     assert len(provider.calls) == 2
-    assert provider.calls[0][1]
-    assert provider.calls[1][1] == ()
+    assert provider.calls[0].tools
+    assert provider.calls[1].tools == ()
     assert [message.role for message in session.messages] == ["user", "assistant", "tool", "assistant"]
 
 
@@ -59,7 +59,7 @@ def test_tool_failure_is_fed_back(tmp_path: Path) -> None:
 
     list(make_session(provider, tmp_path).send("read missing"))
 
-    assert "文件不存在" in provider.calls[1][0][-1].content
+    assert "文件不存在" in provider.calls[1].messages[-1].content
 
 
 def test_unknown_tool_is_fed_back(tmp_path: Path) -> None:
@@ -74,7 +74,7 @@ def test_unknown_tool_is_fed_back(tmp_path: Path) -> None:
 
     list(make_session(provider, tmp_path).send("unknown"))
 
-    assert "未知工具" in provider.calls[1][0][-1].content
+    assert "未知工具" in provider.calls[1].messages[-1].content
 
 
 def test_followup_tool_call_is_not_executed_again(tmp_path: Path) -> None:

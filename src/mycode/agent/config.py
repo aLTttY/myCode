@@ -11,6 +11,7 @@ AgentMode = Literal["default", "plan", "do"]
 class AgentConfig:
     max_iterations: int = 8
     max_unknown_tool_calls: int = 2
+    prompt_repeat_interval: int = 3
 
 
 @dataclass(frozen=True)

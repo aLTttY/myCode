@@ -31,7 +31,12 @@ class ToolEventAgent:
 
     def run(self, request: AgentRequest, cancellation: object | None = None) -> Iterator[AgentEvent]:
         yield AgentEvent(type="progress", iteration=1, max_iterations=8, message="iteration 1/8")
-        yield AgentEvent(type="tool_call_started", tool_call_id="1", tool_name="read_file")
+        yield AgentEvent(
+            type="tool_call_started",
+            tool_call_id="1",
+            tool_name="read_file",
+            tool_arguments={"path": "a.txt", "content": "hidden"},
+        )
         yield AgentEvent(
             type="tool_result",
             tool_call_id="1",
@@ -142,8 +147,13 @@ def test_cli_prints_agent_tool_events(monkeypatch: pytest.MonkeyPatch, capsys: p
     assert cli.main([]) == 0
     output = capsys.readouterr().out
     assert "[agent] iteration 1/8" in output
-    assert "[tool] read_file 开始" in output
+    assert "[tool] read_file 开始：path=a.txt" in output
     assert "[tool] read_file 成功：完成" in output
+
+
+def test_format_tool_arguments_hides_large_or_sensitive_values() -> None:
+    assert cli.format_tool_arguments({"path": "test.md", "content": "secret"}) == "path=test.md"
+    assert cli.format_tool_arguments({"path": "x" * 130}) == f"path={'x' * 117}..."
 
 
 def test_cli_prints_non_completed_stop_reason(monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]) -> None:
@@ -181,6 +191,38 @@ def test_cli_prints_partial_token_usage(monkeypatch: pytest.MonkeyPatch, capsys:
     output = capsys.readouterr().out
     assert "[usage] input=1 total=3" in output
     assert "output=" not in output
+
+
+def test_cli_prints_cache_token_usage(monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]) -> None:
+    inputs = iter(["usage", "exit"])
+    TokenUsageAgent.usage = TokenUsage(
+        input_tokens=10,
+        output_tokens=2,
+        total_tokens=12,
+        cache_read_tokens=7,
+        cache_creation_tokens=3,
+    )
+    monkeypatch.setattr(cli, "load_config", lambda path: AppConfig("deepseek", "m", "u", "k"))
+    monkeypatch.setattr(cli, "create_provider", lambda config: object())
+    monkeypatch.setattr(cli, "AgentRunner", TokenUsageAgent)
+    monkeypatch.setattr(cli, "read_user_input", lambda prompt: next(inputs))
+
+    assert cli.main([]) == 0
+
+    assert "[usage] input=10 output=2 total=12 cache_read=7 cache_create=3" in capsys.readouterr().out
+
+
+def test_cli_prints_cache_unavailable(monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]) -> None:
+    inputs = iter(["usage", "exit"])
+    TokenUsageAgent.usage = TokenUsage(input_tokens=1, cache_unavailable=True)
+    monkeypatch.setattr(cli, "load_config", lambda path: AppConfig("deepseek", "m", "u", "k"))
+    monkeypatch.setattr(cli, "create_provider", lambda config: object())
+    monkeypatch.setattr(cli, "AgentRunner", TokenUsageAgent)
+    monkeypatch.setattr(cli, "read_user_input", lambda prompt: next(inputs))
+
+    assert cli.main([]) == 0
+
+    assert "[usage] input=1 cache=unavailable" in capsys.readouterr().out
 
 
 def test_cli_skips_empty_token_usage(monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]) -> None:

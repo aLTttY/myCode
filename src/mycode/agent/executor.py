@@ -38,7 +38,12 @@ class BatchToolExecutor:
         for call in calls:
             if cancellation.is_cancelled():
                 return
-            yield AgentEvent(type="tool_call_started", tool_call_id=call.id, tool_name=call.name)
+            yield AgentEvent(
+                type="tool_call_started",
+                tool_call_id=call.id,
+                tool_name=call.name,
+                tool_arguments=call.arguments,
+            )
             result = executor.execute(call)
             yield AgentEvent(
                 type="tool_result",
@@ -56,7 +61,12 @@ class BatchToolExecutor:
         for call in calls:
             if cancellation.is_cancelled():
                 return
-            yield AgentEvent(type="tool_call_started", tool_call_id=call.id, tool_name=call.name)
+            yield AgentEvent(
+                type="tool_call_started",
+                tool_call_id=call.id,
+                tool_name=call.name,
+                tool_arguments=call.arguments,
+            )
 
         single_executor = ToolExecutor(self.registry, self.context)
         with ThreadPoolExecutor(max_workers=max(1, len(calls))) as pool:
