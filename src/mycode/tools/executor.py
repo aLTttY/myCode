@@ -2,20 +2,40 @@ from __future__ import annotations
 
 from concurrent.futures import ThreadPoolExecutor, TimeoutError
 
+from mycode.permissions.approval import safe_target_summary
+from mycode.permissions.service import PermissionService
 from mycode.tools.registry import ToolRegistry
 from mycode.types import ToolCall, ToolContext, ToolError, ToolResult
 
 
 class ToolExecutor:
-    def __init__(self, registry: ToolRegistry, context: ToolContext) -> None:
+    def __init__(
+        self,
+        registry: ToolRegistry,
+        context: ToolContext,
+        permission_service: PermissionService | None = None,
+    ) -> None:
         self.registry = registry
         self.context = context
+        self.permission_service = permission_service or PermissionService.with_mode("default")
 
     def execute(self, call: ToolCall) -> ToolResult:
         try:
             tool = self.registry.get(call.name)
         except ToolError as exc:
             return ToolResult(ok=False, message=exc.user_message, data={"tool": call.name})
+
+        decision = self.permission_service.authorize(call, self.context)
+        if not decision.allowed:
+            return ToolResult(
+                ok=False,
+                message=decision.message,
+                data={
+                    "tool": call.name,
+                    "permission_reason": decision.reason_code,
+                    "permission_target": safe_target_summary(decision.target),
+                },
+            )
 
         try:
             executor = ThreadPoolExecutor(max_workers=1)

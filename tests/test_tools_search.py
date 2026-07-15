@@ -43,3 +43,20 @@ def test_search_code_skips_binary_files(tmp_path: Path) -> None:
     result = SearchCodeTool().run({"query": "agent"}, context(tmp_path))
 
     assert result.data["matches"] == []
+
+
+def test_search_code_limits_scope(tmp_path: Path) -> None:
+    (tmp_path / "src").mkdir()
+    (tmp_path / "docs").mkdir()
+    (tmp_path / "src/app.py").write_text("agent", encoding="utf-8")
+    (tmp_path / "docs/guide.md").write_text("agent", encoding="utf-8")
+
+    result = SearchCodeTool().run({"query": "agent", "path": "src"}, context(tmp_path))
+
+    assert [match["path"] for match in result.data["matches"]] == ["src/app.py"]
+
+
+def test_search_code_rejects_outside_scope(tmp_path: Path) -> None:
+    result = SearchCodeTool().run({"query": "agent", "path": "../outside"}, context(tmp_path))
+    assert not result.ok
+    assert "项目目录" in result.message

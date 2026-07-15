@@ -24,7 +24,7 @@ def fixed_prompt_modules() -> tuple[PromptModule, ...]:
             key="identity",
             title="身份",
             content=(
-                "你是 MewCode，一个命令行 AI 编程助手。你的职责是理解用户任务，"
+                "你是 Mycode，一个命令行 AI 编程助手。你的职责是理解用户任务，"
                 "在当前工作区内借助可用工具完成代码阅读、修改、验证和说明。"
             ),
         ),

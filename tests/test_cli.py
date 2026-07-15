@@ -7,6 +7,8 @@ import pytest
 from mycode import cli
 from mycode.agent.config import AgentRequest
 from mycode.agent.events import AgentEvent
+from mycode.permissions.approval import TerminalApprovalHandler
+from mycode.permissions.models import ApprovalPrompt, PermissionConfigSet, PermissionLayer
 from mycode.types import AppConfig, ConfigError, ProviderError, TokenUsage, ToolResult
 
 
@@ -100,6 +102,42 @@ def test_parse_agent_request_modes() -> None:
     assert cli.parse_agent_request("/plan 检查项目") == AgentRequest("检查项目", mode="plan")
     assert cli.parse_agent_request("/do 执行计划") == AgentRequest("执行计划", mode="do")
     assert cli.parse_agent_request("普通问题") == AgentRequest("普通问题", mode="default")
+
+
+def test_cli_permission_mode_overrides_config(monkeypatch: pytest.MonkeyPatch) -> None:
+    captured: list[str | None] = []
+
+    class FakePermissionLoader:
+        def __init__(self, known_tools: set[str]) -> None:
+            pass
+
+        def load(self, workspace: object, mode: str | None = None) -> PermissionConfigSet:
+            captured.append(mode)
+            return PermissionConfigSet(
+                PermissionLayer("user"),
+                PermissionLayer("project"),
+                PermissionLayer("local"),
+                mode or "default",
+            )
+
+    monkeypatch.setattr(cli, "load_config", lambda path: AppConfig("deepseek", "m", "u", "k"))
+    monkeypatch.setattr(cli, "create_provider", lambda config: object())
+    monkeypatch.setattr(cli, "PermissionConfigLoader", FakePermissionLoader)
+    monkeypatch.setattr(cli, "read_user_input", lambda prompt: "exit")
+
+    assert cli.main(["--permission-mode", "strict"]) == 0
+    assert captured == ["strict"]
+
+
+def test_terminal_approval_supports_all_choices_and_reprompts() -> None:
+    values = iter(["invalid", "s"])
+    output: list[str] = []
+    handler = TerminalApprovalHandler(input_func=lambda _: next(values), output_func=output.append)
+
+    choice = handler.request(ApprovalPrompt("read_file", "a.txt", "test"))
+
+    assert choice == "allow_session"
+    assert any("无效选择" in line for line in output)
 
 
 def test_cli_returns_nonzero_on_config_error(monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]) -> None:

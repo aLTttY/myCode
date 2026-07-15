@@ -1,82 +1,67 @@
-# Structured System Prompt Checklist
+# Mycode 五层权限系统 Checklist
 
-> 每一项通过运行代码或观察行为来验证，聚焦系统行为。
+> 每项都必须通过运行测试、检查配置文件或观察 CLI 行为验证。危险命令只允许传给权限判定器测试，禁止实际执行。
 
-## 实现完整性
+## 不可绕过安全层
 
-- [ ] 结构化全局指令包含七个固定模块，顺序为身份、系统约束、任务模式、动作执行、工具使用、语气风格、文本输出。（验证：运行 `PYTHONPATH=src .venv/bin/python -m pytest tests/test_prompts.py -k modules`）
-- [ ] 环境信息作为动态系统内容注入，改变 cwd、日期或运行模式不会改变稳定提示文本。（验证：运行 `PYTHONPATH=src .venv/bin/python -m pytest tests/test_prompts.py -k environment`）
-- [ ] 自定义指令、已激活 Skill、长期记忆有明确可选模块位置，且不影响七个固定模块顺序。（验证：运行 `PYTHONPATH=src .venv/bin/python -m pytest tests/test_prompts.py -k optional`）
-- [ ] 生成的提示文本有稳定分隔，快照或顺序测试能检测模块顺序和内容变化。（验证：运行 `PYTHONPATH=src .venv/bin/python -m pytest tests/test_prompts.py -k render`）
-- [ ] 稳定系统提示不包含 cwd、日期、用户输入、对话历史或当前迭代次数。（验证：运行 `PYTHONPATH=src .venv/bin/python -m pytest tests/test_prompts.py -k stable`）
+- [ ] AC1：所有已注册工具在实现执行前都经过权限判定，被拒绝的工具实现调用次数为零。（验证：运行 `PYTHONPATH=src .venv/bin/python -m pytest tests/test_tool_executor.py tests/test_tools_registry.py`）
+- [ ] AC2：根目录或用户目录破坏、磁盘覆写或格式化、系统目录递归权限修改、关机重启和 fork bomb 样例全部被黑名单判定器拒绝。（验证：运行 `PYTHONPATH=src .venv/bin/python -m pytest tests/test_permissions_blacklist.py`，确认测试不调用 shell）
+- [ ] AC3：strict、default、allow、各层 allow 规则和人工放行均不能覆盖黑名单。（验证：运行 `PYTHONPATH=src .venv/bin/python -m pytest tests/test_permissions_blacklist.py tests/test_permissions_service.py`）
+- [ ] AC4：普通删除项目内文件、包安装或管道命令等可能合理的开发操作不被硬黑名单直接命中，仍进入规则、模式或审批层。（验证：运行 `PYTHONPATH=src .venv/bin/python -m pytest tests/test_permissions_blacklist.py tests/test_permissions_service.py`）
+- [ ] AC5：文件工具拒绝绝对路径、`..` 越界和解析到项目外的符号链接，且目标文件内容不发生变化。（验证：运行 `PYTHONPATH=src .venv/bin/python -m pytest tests/test_permissions_sandbox.py tests/test_tools_files.py`）
+- [ ] AC6：命令中的可识别项目外显式路径、无法规范化路径和项目外符号链接被拒绝，错误结果建议使用项目内路径或专用工具。（验证：运行 `PYTHONPATH=src .venv/bin/python -m pytest tests/test_permissions_sandbox.py tests/test_tools_command.py`）
 
-## 动态注入
+## 规则与权限模式
 
-- [ ] 运行时动态补充指令带 `<mewcode_runtime_instruction>` 或等价特殊标签，并以系统级内容发送。（验证：运行 `PYTHONPATH=src .venv/bin/python -m pytest tests/test_prompts.py tests/test_agent_runner.py -k runtime_instruction`）
-- [ ] 环境信息带 `<mewcode_environment>` 或等价特殊标签，并以系统级内容发送。（验证：运行 `PYTHONPATH=src .venv/bin/python -m pytest tests/test_prompts.py tests/test_agent_runner.py -k environment`）
-- [ ] Plan Mode 请求不再把模式说明拼接进用户文本，用户消息只包含原始任务正文。（验证：运行 `PYTHONPATH=src .venv/bin/python -m pytest tests/test_agent_runner.py -k plan`）
-- [ ] Plan Mode 首轮注入完整规则，间隔轮次重复完整规则，其余轮次注入精简提醒。（验证：运行 `PYTHONPATH=src .venv/bin/python -m pytest tests/test_prompts.py tests/test_agent_runner.py -k "plan and instruction"`）
-- [ ] Plan Mode 动态指令明确只允许观察、分析和产出计划，不允许写文件、改文件或执行命令。（验证：运行 `PYTHONPATH=src .venv/bin/python -m pytest tests/test_prompts.py -k plan`）
-- [ ] Do Mode 和默认模式动态指令明确允许在全局规则、安全边界和工具约定下使用完整工具集。（验证：运行 `PYTHONPATH=src .venv/bin/python -m pytest tests/test_prompts.py tests/test_agent_runner.py -k "do or default"`）
+- [ ] AC7：无通配符规则只匹配完整目标；包含 `*`、`?` 或字符类的规则按大小写敏感 glob 匹配，且不命中无关目标。（验证：运行 `PYTHONPATH=src .venv/bin/python -m pytest tests/test_permissions_rules.py`）
+- [ ] AC8：`run_command(git *)` 匹配完整命令；文件规则匹配规范化相对路径；文件内容和搜索 query 的变化不改变路径规则结果。（验证：运行 `PYTHONPATH=src .venv/bin/python -m pytest tests/test_permissions_rules.py tests/test_permissions_service.py tests/test_tools_search.py`）
+- [ ] AC9：会话、本地、项目、用户层存在冲突时，结果严格符合“会话 > 本地 > 项目 > 用户”。（验证：运行 `PYTHONPATH=src .venv/bin/python -m pytest tests/test_permissions_rules.py tests/test_permissions_config.py`）
+- [ ] AC10：同层精确规则优先于 glob；相同匹配类型下 deny 优先于 allow。（验证：运行 `PYTHONPATH=src .venv/bin/python -m pytest tests/test_permissions_rules.py`）
+- [ ] AC11：所有规则未命中时，strict 拒绝、default 请求审批、allow 放行。（验证：运行 `PYTHONPATH=src .venv/bin/python -m pytest tests/test_permissions_service.py`）
+- [ ] AC12：任意显式 deny 命中后不调用审批器，也不受 allow 模式影响。（验证：运行 `PYTHONPATH=src .venv/bin/python -m pytest tests/test_permissions_service.py`）
 
-## 工具规则
+## 人在回路与持久化
 
-- [ ] 工具描述中能观察到专用工具优先规则，例如读文件、找文件、搜索代码和编辑文件分别使用对应工具。（验证：运行 `PYTHONPATH=src .venv/bin/python -m pytest tests/test_tool_descriptions.py -k dedicated`）
-- [ ] 全局指令中能观察到专用工具优先规则。（验证：运行 `PYTHONPATH=src .venv/bin/python -m pytest tests/test_prompts.py -k tool`）
-- [ ] 工具描述和全局指令中都能观察到编辑前必须读取或搜索确认当前内容的规则。（验证：运行 `PYTHONPATH=src .venv/bin/python -m pytest tests/test_prompts.py tests/test_tool_descriptions.py -k "edit or read"`）
-- [ ] 工具描述和全局指令中都能观察到工作区边界和安全规则。（验证：运行 `PYTHONPATH=src .venv/bin/python -m pytest tests/test_prompts.py tests/test_tool_descriptions.py -k workspace`）
-- [ ] 工具描述强化不改变工具 name 和参数 schema。（验证：运行 `PYTHONPATH=src .venv/bin/python -m pytest tests/test_tool_descriptions.py -k schema`）
+- [ ] AC13：default 模式审批提示可观察到工具名、安全处理后的目标、判定原因，以及拒绝、本次、本会话、永久四种选择。（验证：运行 `PYTHONPATH=src .venv/bin/python -m pytest tests/test_cli.py tests/test_permissions_service.py`）
+- [ ] AC14：本次放行只允许当前调用，随后相同调用会重新经过规则或审批。（验证：运行 `PYTHONPATH=src .venv/bin/python -m pytest tests/test_permissions_service.py`）
+- [ ] AC15：本会话放行在当前权限服务实例中直接命中；重建服务后该规则消失。（验证：运行 `PYTHONPATH=src .venv/bin/python -m pytest tests/test_permissions_service.py`）
+- [ ] AC16：永久放行去重写入 `.mycode/permissions.local.yaml`；重建服务后仍命中，项目和用户配置保持不变。（验证：运行 `PYTHONPATH=src .venv/bin/python -m pytest tests/test_permissions_config.py tests/test_permissions_service.py`）
+- [ ] AC17：CLI 能收集真实审批选择；无审批接口、EOF 或非交互调用会安全拒绝待审批请求。（验证：运行 `PYTHONPATH=src .venv/bin/python -m pytest tests/test_cli.py tests/test_permissions_service.py tests/test_session_tools.py`）
 
-## Provider 集成
+## Agent Loop 与集成
 
-- [ ] Provider 请求中稳定全局指令、环境信息、可选模块、模式补充消息、对话历史和工具描述保持结构化分离。（验证：运行 `PYTHONPATH=src .venv/bin/python -m pytest tests/test_providers.py tests/test_agent_runner.py -k chat_request`）
-- [ ] OpenAI-compatible payload 按顺序发送稳定 system 消息、环境 system 消息、可选 system 消息、模式 system 消息和普通历史。（验证：运行 `PYTHONPATH=src .venv/bin/python -m pytest tests/test_providers.py -k openai`）
-- [ ] Anthropic payload 使用顶层 system content blocks 表达稳定提示、环境信息、可选模块和动态指令。（验证：运行 `PYTHONPATH=src .venv/bin/python -m pytest tests/test_providers.py -k anthropic`）
-- [ ] 支持缓存控制的 Provider 请求包含稳定提示或工具描述的缓存标记或等价结构。（验证：运行 `PYTHONPATH=src .venv/bin/python -m pytest tests/test_providers.py -k cache_control`）
-- [ ] 不支持缓存控制或未返回缓存字段的 Provider 能正常完成请求，并产生缓存不可验证的可观察信息。（验证：运行 `PYTHONPATH=src .venv/bin/python -m pytest tests/test_providers.py tests/test_cli.py -k "cache_unavailable or usage"`）
-- [ ] API 返回缓存命中字段时，myCode 能解析缓存读取和缓存创建 token。（验证：运行 `PYTHONPATH=src .venv/bin/python -m pytest tests/test_providers.py -k cache`）
-- [ ] 缓存读取、缓存创建或缓存不可验证信息能通过 token 用量事件或 CLI 输出观察到。（验证：运行 `PYTHONPATH=src .venv/bin/python -m pytest tests/test_cli.py -k usage`）
+- [ ] AC18：黑名单、沙箱、规则 deny 和用户拒绝均形成包含稳定原因码的 `ToolResult(ok=False)` 并写入消息历史。（验证：运行 `PYTHONPATH=src .venv/bin/python -m pytest tests/test_tool_executor.py tests/test_agent_runner.py tests/test_session_tools.py`）
+- [ ] AC19：模型第一轮工具调用被拒绝后，Agent Loop 进入下一轮，模型能选择安全替代方案并正常完成。（验证：运行 `PYTHONPATH=src .venv/bin/python -m pytest tests/test_agent_runner.py`）
+- [ ] AC20：多个有副作用工具继续串行判定和执行；并发只读调用不会产生重叠审批或重复永久写入。（验证：运行 `PYTHONPATH=src .venv/bin/python -m pytest tests/test_agent_executor.py tests/test_permissions_service.py`）
+- [ ] AC21：用户、项目、本地 YAML 均能加载；任一或全部可选文件不存在时启动仍正常。（验证：运行 `PYTHONPATH=src .venv/bin/python -m pytest tests/test_permissions_config.py tests/test_cli.py`）
+- [ ] AC22：重复键、未知字段、YAML 语法错误、无效模式、未知结果、无效规则和未知工具名产生可理解配置错误，且不会降级放行。（验证：运行 `PYTHONPATH=src .venv/bin/python -m pytest tests/test_permissions_config.py tests/test_cli.py`）
+- [ ] AC23：普通聊天、Plan Mode、Do Mode、工具流式回灌、用户取消、未知工具阈值和最大迭代次数继续通过回归测试。（验证：运行 `PYTHONPATH=src .venv/bin/python -m pytest tests/test_session.py tests/test_tool_streaming.py tests/test_agent_runner.py tests/test_cli.py`）
+- [ ] AC24：自动化测试覆盖不可绕过层、规则与模式、三种放行范围、无交互拒绝和拒绝后继续循环。（验证：运行 `PYTHONPATH=src .venv/bin/python -m pytest tests/test_permissions_blacklist.py tests/test_permissions_sandbox.py tests/test_permissions_rules.py tests/test_permissions_config.py tests/test_permissions_service.py tests/test_agent_runner.py`）
 
-## Agent 与 CLI 回归
+## 架构与配置一致性
 
-- [ ] AgentRunner 每轮调用 Provider 时传入 `ChatRequest`，并使用强化后的当前模式工具描述。（验证：运行 `PYTHONPATH=src .venv/bin/python -m pytest tests/test_agent_runner.py -k chat_request`）
-- [ ] Plan Mode 只开放 `read_file`、`find_files`、`search_code`，写文件、改文件和执行命令不会开放给模型。（验证：运行 `PYTHONPATH=src .venv/bin/python -m pytest tests/test_agent_runner.py -k plan`）
-- [ ] Do Mode 和默认模式仍开放完整工具集。（验证：运行 `PYTHONPATH=src .venv/bin/python -m pytest tests/test_agent_runner.py -k "do or default"`）
-- [ ] 普通无工具聊天仍保持流式输出。（验证：运行 `PYTHONPATH=src .venv/bin/python -m pytest tests/test_agent_runner.py tests/test_cli.py -k "plain or text_delta"`）
-- [ ] 现有 Agent Loop 工具调用和工具结果回写仍可正常运行。（验证：运行 `PYTHONPATH=src .venv/bin/python -m pytest tests/test_agent_runner.py tests/test_tool_streaming.py tests/test_session_tools.py`）
-- [ ] CLI 能展示 input、output、total 以及 cache usage 字段，旧格式仍兼容。（验证：运行 `PYTHONPATH=src .venv/bin/python -m pytest tests/test_cli.py -k usage`）
-
-## 人工对比
-
-- [ ] 人工对比文档覆盖“读取后编辑”场景，包含输入、观察点和通过标准。（验证：阅读 `docs/manual-eval-structured-prompts.md`）
-- [ ] 人工对比文档覆盖“Plan Mode 只读”场景，包含输入、观察点和通过标准。（验证：阅读 `docs/manual-eval-structured-prompts.md`）
-- [ ] 人工对比文档覆盖“专用工具优先”场景，包含输入、观察点和通过标准。（验证：阅读 `docs/manual-eval-structured-prompts.md`）
-- [ ] 人工对比文档覆盖“环境变化缓存稳定”场景，包含输入、观察点和通过标准。（验证：阅读 `docs/manual-eval-structured-prompts.md`）
-- [ ] 人工对比文档覆盖“多轮动态注入”场景，包含输入、观察点和通过标准。（验证：阅读 `docs/manual-eval-structured-prompts.md`）
+- [ ] 所有工具入口共享统一 PermissionService，不存在 AgentRunner 或 ChatSession 绕过 ToolExecutor 权限门禁的路径。（验证：运行 `rg -n "ToolExecutor|PermissionService" src/mycode` 并结合 `tests/test_tool_executor.py`、`tests/test_session_tools.py` 的结果检查）
+- [ ] 黑名单模式只存在于代码常量，不接受 YAML 注入、删除或覆盖。（验证：检查 `src/mycode/permissions/blacklist.py` 与配置解析允许字段，并运行权限配置测试）
+- [ ] 权限模式来源符合 CLI > 本地 > 项目 > 用户 > default，且与 Plan/Do Agent 模式使用不同字段和类型。（验证：运行 `PYTHONPATH=src .venv/bin/python -m pytest tests/test_permissions_config.py tests/test_cli.py tests/test_agent_runner.py`）
+- [ ] 本地权限文件被忽略，项目共享权限文件未被忽略。（验证：运行 `git check-ignore .mycode/permissions.local.yaml` 应成功；运行 `git check-ignore .mycode/permissions.yaml` 应不匹配）
+- [ ] README 明确记录三层配置、会话优先级、三档模式、四种审批决定、不可覆盖层和命令隐式访问限制。（验证：运行 `rg -n "permissions\.yaml|permissions\.local\.yaml|strict|default|allow|隐式文件访问" README.md`）
+- [ ] 文档和用户可见文案统一使用 `Mycode`。（验证：运行 `rg -n "Mycode" spec.md plan.md task.md checklist.md README.md config.example.yaml` 并人工确认命名一致）
 
 ## 编译与测试
 
-- [ ] Python 源码语法检查通过。（验证：运行 `PYTHONPYCACHEPREFIX=.pycache .venv/bin/python -m compileall src tests`）
-- [ ] 提示构建测试通过。（验证：运行 `PYTHONPATH=src .venv/bin/python -m pytest tests/test_prompts.py`）
-- [ ] 工具描述强化测试通过。（验证：运行 `PYTHONPATH=src .venv/bin/python -m pytest tests/test_tool_descriptions.py`）
-- [ ] Provider 测试通过。（验证：运行 `PYTHONPATH=src .venv/bin/python -m pytest tests/test_providers.py`）
-- [ ] AgentRunner 测试通过。（验证：运行 `PYTHONPATH=src .venv/bin/python -m pytest tests/test_agent_runner.py`）
-- [ ] CLI 测试通过。（验证：运行 `PYTHONPATH=src .venv/bin/python -m pytest tests/test_cli.py`）
-- [ ] 工具流和会话工具回归测试通过。（验证：运行 `PYTHONPATH=src .venv/bin/python -m pytest tests/test_tool_streaming.py tests/test_session_tools.py`）
-- [ ] 全量自动化测试通过。（验证：运行 `PYTHONPATH=src .venv/bin/python -m pytest`）
-- [ ] 项目中没有提交真实 API Key。（验证：运行 `rg -n "sk-[A-Za-z0-9]"`，期望无匹配）
+- [ ] Python 源码可编译，无语法或导入错误。（验证：运行 `PYTHONPATH=src .venv/bin/python -m compileall -q src`）
+- [ ] 权限模块全部定向测试通过。（验证：运行 `PYTHONPATH=src .venv/bin/python -m pytest tests/test_permissions_blacklist.py tests/test_permissions_sandbox.py tests/test_permissions_rules.py tests/test_permissions_config.py tests/test_permissions_service.py`）
+- [ ] 全部项目测试通过。（验证：运行 `PYTHONPATH=src .venv/bin/python -m pytest`）
+- [ ] 变更不存在空白错误或未解决占位符。（验证：运行 `git diff --check`，再运行 `rg -n "TODO|TBD" spec.md plan.md task.md checklist.md src tests README.md config.example.yaml || true`）
 
 ## 端到端场景
 
-- [ ] 场景 1：普通输入无工具调用时直接流式输出最终回复。（验证：运行 plain chat 相关测试，观察 `text_delta` 和 `completed`）
-- [ ] 场景 2：Plan Mode 查看项目并输出计划，不产生文件修改或命令执行能力暴露。（验证：运行 Plan Mode 工具集合测试，观察只读工具列表）
-- [ ] 场景 3：Do Mode 或默认模式请求可使用完整工具集合执行实际任务。（验证：运行 Do/default 工具集合测试，观察副作用工具可用）
-- [ ] 场景 4：多轮工具循环中首轮完整注入，下一轮精简提醒，间隔轮再次完整注入。（验证：用 fake Provider 运行 AgentRunner，观察每轮 `ChatRequest.dynamic_system_messages`）
-- [ ] 场景 5：环境信息变化时稳定系统提示不变，动态环境消息变化。（验证：用不同 `EnvironmentInfo` 调用 `PromptBuilder`，比较 `stable_system_prompt` 和 `environment_message`）
-- [ ] 场景 6：Provider 返回缓存命中字段时，CLI 可观察到缓存读取或创建 token。（验证：用 fake usage 事件运行 Provider/CLI usage 测试）
+- [ ] 场景 1：default 模式下模型请求未命中规则的工具 → 用户拒绝 → 拒绝结果回灌 → 模型下一轮改用已允许的安全工具 → 任务完成。（验证：运行 `PYTHONPATH=src .venv/bin/python -m pytest tests/test_agent_runner.py tests/test_cli.py`）
+- [ ] 场景 2：用户选择永久放行 → 本地 YAML 原子写入精确 allow → 重建权限服务 → 相同工具目标无需再次审批。（验证：运行 `PYTHONPATH=src .venv/bin/python -m pytest tests/test_permissions_config.py tests/test_permissions_service.py`）
+- [ ] 场景 3：allow 模式和高优先级 allow 规则尝试放行黑名单命令或项目外符号链接 → 不可覆盖安全层仍拒绝，工具实现不执行。（验证：运行 `PYTHONPATH=src .venv/bin/python -m pytest tests/test_permissions_blacklist.py tests/test_permissions_sandbox.py tests/test_permissions_service.py tests/test_tool_executor.py`）
+- [ ] 场景 4：Plan Mode 只向模型暴露只读工具 → 只读调用仍经过权限判定 → 获准后执行并返回结果。（验证：运行 `PYTHONPATH=src .venv/bin/python -m pytest tests/test_agent_runner.py tests/test_agent_tools.py`）
 
-## 验收记录要求
+## 已知限制核对
 
-- [ ] 每个 checklist 条目执行后记录实际结果，所有结论都基于命令输出或可观察行为。
-- [ ] 若任一测试失败，先判断是否属于本阶段变更，再修复并重跑相关验证。
-- [ ] 最终验收报告需要列出通过项数量、失败项、修复动作和关键命令输出。
+- [ ] 实现和文档没有宣称命令工具具备完整运行时文件系统隔离；只承诺检查可识别的显式路径。（验证：检查 README 与 `src/mycode/permissions/sandbox.py`，对照 `spec.md` F5 和 `plan.md`“已知限制与后续工作”）
+- [ ] 网络限制、资源配额、审计日志、GUI 和容器化没有混入本阶段实现。（验证：检查变更文件清单和 `git diff --stat`，对照 spec“ 不做的事”）

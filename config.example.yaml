@@ -18,3 +18,9 @@ api_key: ${DEEPSEEK_API_KEY}
 # thinking:
 #   enabled: true
 #   budget_tokens: 4096
+
+# 权限配置与 Provider 配置分开存放：
+#   用户级：~/.mycode/permissions.yaml
+#   项目级：<workspace>/.mycode/permissions.yaml
+#   本地级：<workspace>/.mycode/permissions.local.yaml
+# 也可以用 --permission-mode strict|default|allow 覆盖本次进程。

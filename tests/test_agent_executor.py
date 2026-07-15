@@ -6,12 +6,18 @@ from pathlib import Path
 from mycode.agent.cancellation import CancellationToken
 from mycode.agent.executor import BatchToolExecutor
 from mycode.agent.tools import ToolBatch
+from mycode.permissions.models import PermissionDecision
 from mycode.tools.registry import ToolRegistry, create_default_registry
 from mycode.types import ToolCall, ToolContext, ToolResult, ToolSpec
 
 
 def context(tmp_path: Path) -> ToolContext:
     return ToolContext(workspace_root=tmp_path, timeout_seconds=1.0)
+
+
+class AllowPermissions:
+    def authorize(self, call: ToolCall, context: ToolContext) -> PermissionDecision:
+        return PermissionDecision(True, "test_allow", "allowed", call.name)
 
 
 def test_cancellation_token_is_idempotent() -> None:
@@ -34,7 +40,7 @@ def test_executor_runs_read_batch_and_returns_results(tmp_path: Path) -> None:
         ),
     )
 
-    events = list(BatchToolExecutor(create_default_registry(), context(tmp_path)).execute_batches([batch], CancellationToken()))
+    events = list(BatchToolExecutor(create_default_registry(), context(tmp_path), AllowPermissions()).execute_batches([batch], CancellationToken()))
 
     assert sum(1 for event in events if getattr(event, "type", "") == "tool_call_started") == 2
     assert sum(1 for event in events if getattr(event, "type", "") == "tool_result") == 2
@@ -68,7 +74,7 @@ def test_executor_runs_side_effect_batch_serially(tmp_path: Path) -> None:
         ),
     )
 
-    list(BatchToolExecutor(registry, context(tmp_path)).execute_batches([batch], CancellationToken()))
+    list(BatchToolExecutor(registry, context(tmp_path), AllowPermissions()).execute_batches([batch], CancellationToken()))
 
     assert record == ["write_file", "edit_file"]
 
@@ -90,7 +96,7 @@ def test_executor_runs_mixed_batches_without_crossing_order(tmp_path: Path) -> N
         ),
     ]
 
-    events = list(BatchToolExecutor(registry, context(tmp_path)).execute_batches(batches, CancellationToken()))
+    events = list(BatchToolExecutor(registry, context(tmp_path), AllowPermissions()).execute_batches(batches, CancellationToken()))
 
     assert record == ["read_file", "write_file", "edit_file"]
     assert [item[0] for item in events if isinstance(item, tuple)] == ["1", "2", "3"]
@@ -99,7 +105,7 @@ def test_executor_runs_mixed_batches_without_crossing_order(tmp_path: Path) -> N
 def test_executor_returns_structured_unknown_tool_result(tmp_path: Path) -> None:
     batch = ToolBatch(safety="side_effect", calls=(ToolCall(id="1", name="missing", arguments={}),))
 
-    events = list(BatchToolExecutor(create_default_registry(), context(tmp_path)).execute_batches([batch], CancellationToken()))
+    events = list(BatchToolExecutor(create_default_registry(), context(tmp_path), AllowPermissions()).execute_batches([batch], CancellationToken()))
     result = next(item[1] for item in events if isinstance(item, tuple))
 
     assert result.ok is False
@@ -112,6 +118,6 @@ def test_executor_stops_when_cancelled(tmp_path: Path) -> None:
     token.cancel()
     batch = ToolBatch(safety="side_effect", calls=(ToolCall(id="1", name="read_file", arguments={}),))
 
-    events = list(BatchToolExecutor(create_default_registry(), context(tmp_path)).execute_batches([batch], token))
+    events = list(BatchToolExecutor(create_default_registry(), context(tmp_path), AllowPermissions()).execute_batches([batch], token))
 
     assert events == []

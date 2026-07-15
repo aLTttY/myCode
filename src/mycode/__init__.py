@@ -1,4 +1,4 @@
-"""myCode 命令行 AI 编程助手。"""
+"""Mycode 命令行 AI 编程助手。"""
 
 __all__ = ["__version__"]
 

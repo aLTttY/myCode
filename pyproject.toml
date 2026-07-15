@@ -5,7 +5,7 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "mycode"
 version = "0.1.0"
-description = "myCode command-line AI coding assistant MVP"
+description = "Mycode command-line AI coding assistant MVP"
 readme = "README.md"
 requires-python = ">=3.9"
 dependencies = [

@@ -6,15 +6,22 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from mycode.agent.cancellation import CancellationToken
 from mycode.agent.events import AgentEvent
 from mycode.agent.tools import ToolBatch
+from mycode.permissions.service import PermissionService
 from mycode.tools.executor import ToolExecutor
 from mycode.tools.registry import ToolRegistry
 from mycode.types import ToolCall, ToolContext, ToolResult
 
 
 class BatchToolExecutor:
-    def __init__(self, registry: ToolRegistry, context: ToolContext) -> None:
+    def __init__(
+        self,
+        registry: ToolRegistry,
+        context: ToolContext,
+        permission_service: PermissionService | None = None,
+    ) -> None:
         self.registry = registry
         self.context = context
+        self.permission_service = permission_service or PermissionService.with_mode("default")
 
     def execute_batches(
         self,
@@ -34,7 +41,7 @@ class BatchToolExecutor:
         calls: Sequence[ToolCall],
         cancellation: CancellationToken,
     ) -> Iterator[AgentEvent | tuple[str, ToolResult]]:
-        executor = ToolExecutor(self.registry, self.context)
+        executor = ToolExecutor(self.registry, self.context, self.permission_service)
         for call in calls:
             if cancellation.is_cancelled():
                 return
@@ -68,7 +75,7 @@ class BatchToolExecutor:
                 tool_arguments=call.arguments,
             )
 
-        single_executor = ToolExecutor(self.registry, self.context)
+        single_executor = ToolExecutor(self.registry, self.context, self.permission_service)
         with ThreadPoolExecutor(max_workers=max(1, len(calls))) as pool:
             futures = {pool.submit(single_executor.execute, call): call for call in calls}
             for future in as_completed(futures):

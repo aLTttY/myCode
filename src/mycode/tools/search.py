@@ -5,6 +5,8 @@ import re
 from collections.abc import Iterable, Mapping
 from pathlib import Path
 
+from mycode.permissions.models import PermissionValidationError
+from mycode.permissions.sandbox import resolve_workspace_path
 from mycode.tools.base import optional_bool, require_str, result_error, result_ok, truncate_text
 from mycode.types import ToolContext, ToolError, ToolResult, ToolSpec
 
@@ -14,6 +16,9 @@ MAX_MATCHES = 100
 
 
 def _iter_files(root: Path) -> Iterable[Path]:
+    if root.is_file():
+        yield root
+        return
     for path in root.rglob("*"):
         if any(part in SKIP_DIRS for part in path.relative_to(root).parts):
             continue
@@ -73,6 +78,10 @@ class SearchCodeTool:
                 "properties": {
                     "query": {"type": "string", "description": "Text or regex to search for."},
                     "regex": {"type": "boolean", "description": "Whether query is a regular expression."},
+                    "path": {
+                        "type": "string",
+                        "description": "Optional workspace-relative file or directory scope. Defaults to `.`.",
+                    },
                 },
                 "required": ["query"],
                 "additionalProperties": False,
@@ -89,8 +98,19 @@ class SearchCodeTool:
         except ToolError as exc:
             return result_error(exc.user_message)
 
-        root = context.workspace_root.resolve()
+        try:
+            scope = arguments.get("path", ".")
+            if not isinstance(scope, str) or not scope:
+                raise ToolError("参数 `path` 必须是非空字符串。")
+            root, _ = resolve_workspace_path(context.workspace_root, scope)
+            if not root.exists():
+                return result_error("搜索范围不存在。", path=str(root))
+        except ToolError as exc:
+            return result_error(exc.user_message)
+        except PermissionValidationError as exc:
+            return result_error(exc.message)
         matches: list[dict[str, object]] = []
+        workspace_root = context.workspace_root.resolve()
         for path in _iter_files(root):
             if _is_binary(path):
                 continue
@@ -103,7 +123,7 @@ class SearchCodeTool:
                 if found:
                     matches.append(
                         {
-                            "path": path.relative_to(root).as_posix(),
+                            "path": path.relative_to(workspace_root).as_posix(),
                             "line": line_number,
                             "text": line.strip(),
                         }

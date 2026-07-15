@@ -1,476 +1,318 @@
-# Structured System Prompt Plan
+# Mycode 五层权限系统 Plan
 
 ## 架构概览
 
-本阶段新增独立的提示构建层，位于 Agent 层和 Provider 层之间。Agent 仍负责循环、模式选择和工具执行；提示构建层负责生成稳定系统提示、环境系统消息、会话级补充消息和强化后的工具描述；Provider 层只负责把这些结构转换成各供应商 API 请求格式。
+权限系统位于工具注册表与工具实现之间，所有调用统一经过 `PermissionService`，避免文件工具、命令工具或旧会话入口各自实现不同的权限逻辑。
 
 整体调用链：
 
 ```text
-CLI
-  -> AgentRunner.run(AgentRequest)
-  -> PromptBuilder.build(mode, iteration, environment)
-  -> Provider.stream_chat(ChatRequest)
-  -> Provider converts stable prompt / dynamic system messages / messages / tools
-  -> StreamCollector collects text, tool calls, token usage and cache usage
+CLI / ChatSession / AgentRunner
+  -> ToolExecutor
+  -> PermissionService.authorize
+  -> 黑名单检查
+  -> 权限目标提取与路径沙箱
+  -> 分层规则引擎
+  -> 权限模式默认行为
+  -> 必要时调用 ApprovalHandler
+  -> 获准后执行 Tool.run
+  -> 拒绝时返回结构化 ToolResult
 ```
 
-提示内容分为两类：
+模块划分：
 
-- 稳定内容：固定系统提示模块、可选静态模块、强化后的工具描述。该部分保持确定性，用于缓存。
-- 动态内容：环境信息、按轮注入的模式补充指令、普通对话历史。该部分每轮可变化，不进入稳定缓存段。
+1. `permissions.models`：定义权限模式、规则、请求、判定结果、审批选择和配置对象。
+2. `permissions.blacklist`：保存不可配置的灾难性命令正则，并在命令解析或规则判断前检查原始命令。
+3. `permissions.targets`：按工具提取稳定权限目标；文件路径规范化为工作区相对路径，命令保留完整命令字符串。
+4. `permissions.sandbox`：强制验证文件工具路径；对命令文本中可识别的显式路径做规范化、符号链接解析和越界检查。命令运行时隐式文件访问明确不在本阶段保证范围内。
+5. `permissions.rules`：负责精确/glob 匹配、同层冲突处理和“会话 > 本地 > 项目 > 用户”的跨层选择。
+6. `permissions.config`：加载三层 YAML、解析模式和规则、校验未知字段，并原子更新本地永久 allow 规则。
+7. `permissions.approval`：定义可注入审批协议、非交互安全拒绝实现和 CLI 终端审批实现。
+8. `permissions.service`：按固定顺序编排五层判定，维护会话规则，并把审批选择转换为本次放行、会话规则或本地永久规则。
+9. `tools.executor`：只负责查找工具、调用权限服务、执行已获准工具、处理超时和结构化异常；拒绝不会抛出终止 Agent Loop 的异常。
 
-Provider 兼容策略：
+并发策略：
 
-- OpenAI/DeepSeek 协议：用 `system` 角色消息承载稳定系统提示和动态系统补充消息；如目标接口支持缓存字段，则在稳定系统消息或工具描述上加缓存标记；不支持时保持普通请求。
-- Anthropic 协议：用顶层 `system` content blocks 承载稳定系统提示和动态补充消息；稳定 block 和工具定义使用 `cache_control`；动态 block 不加缓存控制。
+- 有副作用工具继续串行执行。
+- 权限服务对审批和规则写入加锁，避免并发只读调用产生重叠提示或重复写入。
+- 只有获准后的只读工具实现可以并发运行。
 
 ## 核心数据结构
 
-### `PromptModule`
+### `PermissionMode`
 
-表示一个系统提示模块。
+`strict | default | allow`，与 Agent 的 `plan | do | default` 模式分离。
 
-```python
-@dataclass(frozen=True)
-class PromptModule:
-    key: str
-    title: str
-    content: str
-    stable: bool = True
-```
+### `PermissionRule`
 
-- `key`: 稳定标识，用于测试顺序和后续插入模块。
-- `title`: 模块标题，渲染为可读分隔。
-- `content`: 模块正文。
-- `stable`: 是否属于稳定缓存段。本阶段固定全局模块为稳定，环境信息为动态。
+- `tool`：真实工具名。
+- `pattern`：括号内模式。
+- `effect`：`allow | deny`。
+- `source`：`session | local | project | user`。
+- `match_type`：`exact | glob`。
 
-### `PromptOptions`
+### `PermissionLayer`
 
-表示可选提示输入。
+- `source`：规则来源。
+- `mode`：本层可选权限模式。
+- `rules`：本层已校验规则。
 
-```python
-@dataclass(frozen=True)
-class PromptOptions:
-    custom_instructions: str = ""
-    active_skills: tuple[str, ...] = ()
-    long_term_memory: str = ""
-```
+### `PermissionRequest`
 
-- `custom_instructions`: 预留自定义指令内容；本阶段默认空。
-- `active_skills`: 预留已激活 Skill 摘要；本阶段默认空。
-- `long_term_memory`: 预留长期记忆内容；本阶段默认空。
+- `tool_call_id`：当前调用标识。
+- `tool`：工具名。
+- `target`：已规范化的权限目标。
+- `arguments`：原始参数的只读引用，仅供安全检查，不直接写入拒绝消息。
+- `workspace_root`：已解析的项目根目录。
 
-### `EnvironmentInfo`
+### `PermissionDecision`
 
-表示运行时环境信息。
+- `allowed`：是否允许执行。
+- `reason_code`：稳定原因码，如 `blacklisted`、`sandbox_escape`、`rule_allow`、`rule_deny`、`mode_allow`、`user_denied`。
+- `message`：面向用户和模型的简洁说明。
+- `matched_source`：可选规则来源。
+- `matched_rule`：可选命中规则。
+- `target`：权限目标。
 
-```python
-@dataclass(frozen=True)
-class EnvironmentInfo:
-    cwd: str
-    date: str
-    mode: AgentMode
-```
+### `ApprovalChoice`
 
-- `cwd`: 当前工作目录。
-- `date`: 当前日期或时间字符串。
-- `mode`: 当前请求模式。
+`deny | allow_once | allow_session | allow_permanent`。
 
-### `DynamicInstruction`
+### `PermissionConfigSet`
 
-表示系统级补充消息。
+- `user`：用户层配置。
+- `project`：项目层配置。
+- `local`：本地层配置。
+- `effective_mode`：CLI 参数优先，否则本地、项目、用户依次取首个已声明模式，最终默认 `default`。
+
+## 核心接口
+
+### `PermissionService`
 
 ```python
-@dataclass(frozen=True)
-class DynamicInstruction:
-    tag: str
-    content: str
-    full: bool
-```
-
-- `tag`: 特殊标签，例如 `<mewcode_runtime_instruction>`。
-- `content`: 动态规则正文。
-- `full`: 本轮是否为完整注入；用于测试首轮、间隔轮和精简轮。
-
-### `PromptBundle`
-
-表示提示构建结果。
-
-```python
-@dataclass(frozen=True)
-class PromptBundle:
-    stable_system_prompt: str
-    optional_system_prompt: str
-    dynamic_system_messages: tuple[DynamicInstruction, ...]
-    environment_message: DynamicInstruction
-```
-
-- `stable_system_prompt`: 七个固定模块渲染后的稳定提示。
-- `optional_system_prompt`: 自定义指令、已激活 Skill、长期记忆等可选模块渲染后的提示；本阶段默认空。
-- `dynamic_system_messages`: 按轮注入的模式补充消息。
-- `environment_message`: 当前环境信息补充消息。
-
-### `ChatRequest`
-
-Provider 层统一输入。
-
-```python
-@dataclass(frozen=True)
-class ChatRequest:
-    stable_system_prompt: str
-    dynamic_system_messages: tuple[DynamicInstruction, ...]
-    messages: tuple[Message, ...]
-    optional_system_prompt: str = ""
-    tools: tuple[ToolSpec, ...] = ()
-    cache_static_content: bool = True
-```
-
-- `stable_system_prompt`: Provider 转换为系统消息或顶层 system blocks。
-- `optional_system_prompt`: Provider 放在环境信息之后，保持“固定模块 -> 环境信息 -> 可选模块”的优先级顺序。
-- `dynamic_system_messages`: Provider 转换为非缓存系统级内容。
-- `messages`: 普通用户、助手和工具历史。
-- `tools`: 当前模式开放的工具描述。
-- `cache_static_content`: 是否尝试给稳定内容加缓存标记。
-
-### `TokenUsage`
-
-扩展现有 token 用量结构。
-
-```python
-@dataclass(frozen=True)
-class TokenUsage:
-    input_tokens: int | None = None
-    output_tokens: int | None = None
-    total_tokens: int | None = None
-    cache_read_tokens: int | None = None
-    cache_creation_tokens: int | None = None
-    cache_unavailable: bool = False
-```
-
-- `cache_read_tokens`: 从缓存读取的输入 token。
-- `cache_creation_tokens`: 本次写入缓存的输入 token。
-- `cache_unavailable`: Provider 不支持或未返回缓存指标时为 `True`。
-
-## 模块设计
-
-### `mycode.prompts.modules`
-
-**职责：** 定义固定提示模块和可选模块的生成规则。
-
-**对外接口：**
-
-```python
-def fixed_prompt_modules() -> tuple[PromptModule, ...]
-def optional_prompt_modules(options: PromptOptions) -> tuple[PromptModule, ...]
-```
-
-**模块顺序：**
-
-1. 身份
-2. 系统约束
-3. 任务模式
-4. 动作执行
-5. 工具使用
-6. 语气风格
-7. 文本输出
-环境信息由动态补充消息承载，插入在固定模块之后。
-
-可选模块追加在环境信息之后：
-
-1. 自定义指令（可选）
-2. 已激活的 Skill（可选）
-3. 长期记忆（可选）
-
-环境信息不放入稳定模块列表，由动态补充消息单独生成；可选模块默认为空，不影响固定模块顺序。
-
-**覆盖需求：** F1-F4、F12-F14、AC1-AC4、AC11-AC13。
-
-### `mycode.prompts.builder`
-
-**职责：** 拼装稳定系统提示、环境信息和模式补充消息，保证稳定内容与动态内容分离。
-
-**对外接口：**
-
-```python
-class PromptBuilder:
-    def build(
+class PermissionService:
+    def authorize(
         self,
-        mode: AgentMode,
-        iteration: int,
-        environment: EnvironmentInfo,
-        options: PromptOptions = PromptOptions(),
-    ) -> PromptBundle: ...
+        call: ToolCall,
+        context: ToolContext,
+    ) -> PermissionDecision: ...
 ```
 
-**关键规则：**
+内部固定顺序：
 
-- 固定模块按 `modules.py` 的顺序渲染。
-- 模块之间用双换行分隔，模块标题稳定。
-- 环境信息渲染为 `<mewcode_environment>...</mewcode_environment>`。
-- 可选模块渲染在 `optional_system_prompt` 中，由 Provider 放在环境信息之后。
-- 模式补充指令渲染为 `<mewcode_runtime_instruction>...</mewcode_runtime_instruction>`。
-- `stable_system_prompt` 不包含 `cwd`、日期、用户输入、对话历史或当前迭代次数。
+1. 验证工具已注册且参数可形成权限目标。
+2. 对 `run_command` 检查硬黑名单。
+3. 执行文件路径或命令显式路径沙箱检查。
+4. 从会话、本地、项目、用户逐层寻找首个有匹配的层。
+5. 无规则命中时应用权限模式。
+6. `default` 模式调用审批接口。
+7. 根据审批结果只放行本次，或写入会话/本地精确规则。
+8. 返回最终 allow/deny，不直接执行工具。
 
-**覆盖需求：** F5-F8、AC2、AC5-AC7。
-
-### `mycode.prompts.modes`
-
-**职责：** 管理会话级开关的注入频率和不同模式的完整/精简指令。
-
-**对外接口：**
+### `PermissionTargetResolver`
 
 ```python
-def mode_instruction(mode: AgentMode, iteration: int, repeat_interval: int) -> DynamicInstruction
+class PermissionTargetResolver:
+    def resolve(
+        self,
+        tool: str,
+        arguments: Mapping[str, object],
+        workspace_root: Path,
+    ) -> PermissionRequest: ...
 ```
 
-**轮次策略：**
+每种已注册工具必须有明确目标解析策略；未知工具或缺失关键参数返回安全拒绝。
 
-- `iteration == 1`: 完整注入。
-- `iteration % repeat_interval == 0`: 完整注入。
-- 其他轮次：精简提醒。
-
-**Plan Mode 完整规则：**
-
-- 只观察、分析和产出计划。
-- 只能使用只读工具。
-- 不写文件、不改文件、不执行命令。
-- 输出可执行计划，不执行计划。
-
-**Do/default 完整规则：**
-
-- 可在全局规则、安全边界和工具约定下使用完整工具集。
-- 编辑前先读取或搜索确认。
-- 优先用专用工具，命令只用于合适场景。
-
-**覆盖需求：** F9-F11、AC8-AC10。
-
-### `mycode.tools.descriptions`
-
-**职责：** 集中维护工具描述强化文本，避免每个工具类各自散落重复规则。
-
-**对外接口：**
+### `RuleEngine`
 
 ```python
-def reinforce_tool_spec(spec: ToolSpec) -> ToolSpec
-def reinforce_tool_specs(specs: Sequence[ToolSpec]) -> tuple[ToolSpec, ...]
+class RuleEngine:
+    def decide(
+        self,
+        request: PermissionRequest,
+        layers: Sequence[PermissionLayer],
+    ) -> PermissionDecision | None: ...
 ```
 
-**强化规则：**
+返回首个有效层的最终规则结果；没有任何规则匹配时返回 `None`。
 
-- 每个工具描述追加“何时优先使用该工具”。
-- 文件编辑工具追加“编辑前必须读取或搜索确认当前内容”。
-- 文件和命令工具追加工作区边界说明。
-- 规则只改描述，不改变参数 schema 和工具执行逻辑。
-
-**覆盖需求：** F12-F14、AC11-AC13。
-
-### `mycode.providers.base`
-
-**职责：** 把 Provider 协议从 `messages + tools` 升级为统一 `ChatRequest`。
-
-**对外接口：**
+### `ApprovalHandler`
 
 ```python
-class LLMProvider(Protocol):
-    def stream_chat(self, request: ChatRequest) -> Iterator[StreamEvent]: ...
+class ApprovalHandler(Protocol):
+    def request(self, prompt: ApprovalPrompt) -> ApprovalChoice: ...
 ```
 
-**兼容策略：**
+`TerminalApprovalHandler` 使用 CLI 输入；`DenyApprovalHandler` 用于无交互环境。
 
-- 先迁移 AgentRunner 和 tests 使用 `ChatRequest`。
-- Provider 内部保留 `_convert_message` 和工具转换 helper。
-- 如有必要，测试辅助 Provider 也记录 `ChatRequest`，便于断言系统提示和动态消息。
+### `PermissionConfigLoader` / `LocalRuleStore`
 
-**覆盖需求：** F15、F20、AC5、AC18-AC20。
+```python
+class PermissionConfigLoader:
+    def load(self, workspace_root: Path) -> PermissionConfigSet: ...
 
-### `mycode.providers.openai`
+class LocalRuleStore:
+    def add_exact_allow(self, tool: str, target: str) -> None: ...
+```
 
-**职责：** 把 `ChatRequest` 转为 OpenAI/DeepSeek 兼容 payload，并解析缓存字段。
-
-**请求转换：**
-
-- `stable_system_prompt` 转为第一条 `system` 消息。
-- `environment_message` 转为第二条 `system` 消息。
-- `optional_system_prompt` 非空时转为环境信息之后的 `system` 消息。
-- 模式补充消息转为后续 `system` 消息。
-- 普通 `messages` 保持原顺序追加。
-- 工具描述使用强化后的 `ToolSpec` 转为 `tools`。
-- 缓存标记仅在配置或协议允许时添加；默认不破坏现有兼容接口。
-
-**缓存解析：**
-
-- 从 `usage.prompt_tokens_details.cached_tokens` 或等价字段解析缓存读取。
-- 如返回 `cache_creation_input_tokens`、`cache_read_input_tokens` 等字段，也映射到统一 `TokenUsage`。
-- 未返回缓存字段时设置 `cache_unavailable=True`。
-
-**覆盖需求：** F15-F18、AC14-AC16。
-
-### `mycode.providers.anthropic`
-
-**职责：** 把 `ChatRequest` 转为 Anthropic Messages payload，并解析缓存字段。
-
-**请求转换：**
-
-- 顶层 `system` 使用 content block 数组。
-- 稳定系统提示 block 加 `cache_control: {"type": "ephemeral"}`。
-- 动态环境 block 放在固定模块之后，不加缓存控制。
-- 可选提示 block 放在环境信息之后；本阶段默认不加缓存控制，避免未来 Skill 或记忆变化污染固定缓存。
-- 模式补充 block 不加缓存控制。
-- 工具定义在支持时加缓存控制，工具结果转换沿用现有逻辑。
-
-**缓存解析：**
-
-- 从 `usage.cache_read_input_tokens` 和 `usage.cache_creation_input_tokens` 映射统一字段。
-- 未返回缓存字段时设置 `cache_unavailable=True`。
-
-**覆盖需求：** F15-F18、AC14-AC16。
-
-### `mycode.agent.runner`
-
-**职责：** 在每轮模型调用前构造 `ChatRequest`，移除把模式说明拼入用户文本的逻辑。
-
-**关键变化：**
-
-- 用户消息只保存原始用户文本。
-- 每轮循环用当前模式、迭代次数和工作区环境构造提示。
-- 根据模式选择只读或完整工具集后，再强化工具描述。
-- 调用 Provider 时传入 `ChatRequest`。
-
-**覆盖需求：** F6-F11、F20、AC6-AC10、AC18-AC19。
-
-### `mycode.cli`
-
-**职责：** 展示扩展后的 token/cache 用量。
-
-**关键变化：**
-
-- `format_token_usage` 增加 `cache_read`、`cache_create`、`cache=unavailable`。
-- 其他事件展示保持不变。
-
-**覆盖需求：** F18、AC15-AC16。
-
-### `docs/manual-eval-structured-prompts.md`
-
-**职责：** 记录人工对比场景和观察点。
-
-**场景：**
-
-1. 读取后编辑：要求修改文件，观察是否先读取/搜索再编辑。
-2. Plan Mode 只读：使用 `/plan`，观察是否只开放和使用只读工具。
-3. 专用工具优先：要求找文件、读文件、搜代码，观察是否选择对应工具。
-4. 环境变化缓存稳定：改变工作目录或日期模拟输入，观察稳定提示内容不变。
-5. 多轮动态注入：连续工具循环，观察首轮完整、间隔轮完整、其余精简。
-
-**覆盖需求：** F19、AC17。
+本地写入采用临时文件加原子替换；写入前重新读取并校验，避免覆盖当前磁盘内容。
 
 ## 模块交互
 
-### 普通对话
+### 启动阶段
 
-```text
-用户输入
-  -> CLI parse AgentRequest(mode="default")
-  -> AgentRunner append Message(role="user", content=原始文本)
-  -> PromptBuilder build stable prompt + env + default mode instruction
-  -> reinforce_tool_specs(full_registry.tool_specs())
-  -> Provider.stream_chat(ChatRequest)
-  -> Provider sends system messages + history + tools
-  -> StreamCollector emits text_delta/token_usage
-  -> AgentRunner done(completed)
+1. CLI 解析 Provider 配置和可选 `--permission-mode`。
+2. 权限配置加载器依次读取：
+   - `~/.mycode/permissions.yaml`
+   - `<workspace>/.mycode/permissions.yaml`
+   - `<workspace>/.mycode/permissions.local.yaml`
+3. 每层独立校验 YAML 字段、模式、规则语法和工具名。
+4. 按 CLI > 本地 > 项目 > 用户 > default 解析有效权限模式。
+5. 创建终端审批器、规则存储和 `PermissionService`。
+6. 将同一个权限服务注入 AgentRunner、ChatSession 和 ToolExecutor。
+
+三层 YAML 使用统一结构：
+
+```yaml
+mode: default
+
+allow:
+  - "read_file(**)"
+  - "run_command(git *)"
+
+deny:
+  - "write_file(.env)"
+  - "run_command(git push *)"
 ```
 
-### Plan Mode
+`mode`、`allow` 和 `deny` 均可省略。不存在的可选配置文件不报错；未知字段、重复字段、无效模式、无效工具名或规则语法导致明确配置错误并安全停止。
 
-```text
-/plan 用户任务
-  -> AgentRequest(mode="plan", text=不含 /plan 的原始任务)
-  -> AgentRunner selects readonly registry
-  -> PromptBuilder injects Plan Mode dynamic instruction
-  -> Provider receives user message without mode prefix
-  -> Model can see readonly tools only
-  -> Agent emits plan text
-```
+### 单次工具调用
 
-### 多轮工具循环
+1. ToolExecutor 获取已注册工具。
+2. 目标解析器验证参数并生成规范化权限目标。
+3. `run_command` 先对原始命令和规范化命令执行不可绕过黑名单检查。
+4. 沙箱检查文件工具路径或命令中的显式路径。
+5. 规则引擎依次检查会话、本地、项目、用户层。
+6. 规则未命中时应用有效权限模式。
+7. `default` 模式调用审批器。
+8. 会话或永久放行先成功写入对应规则，再允许本次调用。
+9. 最终允许时调用工具；最终拒绝时直接构造 `ToolResult(ok=False, ...)`。
+10. AgentRunner 按现有逻辑回写结果并进入下一轮。
 
-```text
-iteration 1
-  -> full mode instruction
-  -> model calls tools
-  -> tool results append to history
+## 关键安全算法
 
-iteration 2
-  -> compact mode reminder
-  -> model observes tool results
+### 硬黑名单
 
-iteration N where N % repeat_interval == 0
-  -> full mode instruction repeated
-```
+- 黑名单模式以代码常量维护，不从 YAML 加载。
+- 正则同时检查原始命令和去除多余空白后的规范化命令，采用大小写不敏感匹配。
+- 模式覆盖命令前缀、复合命令片段和常见参数顺序，避免简单增加 `sudo`、空白或连接符即可绕过。
+- 命中后立即返回 `blacklisted`，不进入规则、模式或审批。
+- 测试只调用判定器，不实际运行危险命令。
 
-### 缓存用量
+### 文件路径沙箱
 
-```text
-Provider SSE event with usage
-  -> provider-specific parser extracts normal tokens
-  -> provider-specific parser extracts cache read/create tokens when present
-  -> StreamEvent(type="token_usage", token_usage=...)
-  -> AgentEvent(type="token_usage", token_usage=...)
-  -> CLI prints usage and cache fields
-```
+- 工作区根目录先执行 `resolve()`。
+- 现有文件解析完整符号链接链；待创建文件解析其最近存在父目录及符号链接后再拼接文件名。
+- 使用路径层级关系判断是否位于根目录内，不使用字符串前缀判断。
+- 绝对路径、`..` 逃逸、项目外符号链接和解析失败均返回 `sandbox_escape`。
+- 文件规则只接收沙箱验证后的 POSIX 风格相对路径。
+
+### 命令显式路径检查
+
+- 保留现有 shell 命令能力。
+- 对命令词法拆分后可识别的绝对路径、`./`、`../`、`~/`、包含目录分隔符的路径参数、重定向目标和路径型选项值执行沙箱校验。
+- 明确指向项目外、符号链接解析到项目外或无法规范化的显式路径拒绝执行。
+- 不把可执行文件本身的系统路径当作项目文件访问目标。
+- 环境变量展开、程序配置、运行库和程序内部自行访问的路径无法由本阶段完整拦截；该限制写入“已知限制与后续工作”。
+
+### 权限目标
+
+- `read_file`、`write_file`、`edit_file`：规范化项目相对路径。
+- `run_command`：原始完整命令字符串。
+- `find_files`：glob pattern。
+- `search_code`：新增可选搜索范围 `path`，默认 `.`；规则只匹配该范围，不匹配 query。
+- 后续新增工具必须注册权限目标解析器，否则调用安全拒绝。
+
+### 规则解析与匹配
+
+- 规则语法使用完整锚定解析，不接受括号外多余文本。
+- 包含 `*`、`?` 或字符类的模式使用大小写敏感 glob 匹配，其余使用完整字符串相等。
+- 同层先收集全部命中项，再按“精确优先、同类型 deny 优先”得出唯一结果。
+- 某层只要有匹配就停止检查更低层。
+- YAML 使用能检测重复键的安全加载器；未知字段和无效规则使该配置层加载失败，而不是忽略。
+
+### 审批与规则写入
+
+- CLI 显示工具名、经过长度限制和敏感值遮蔽的目标摘要、请求原因与四个选择。
+- 本次放行不修改规则。
+- 会话放行在内存层添加精确 allow。
+- 永久放行在锁内重新读取本地 YAML，校验后去重追加，再通过同目录临时文件原子替换。
+- 永久写入失败时不宣称成功，返回结构化失败结果。
+- 无审批器、审批异常或输入无效时默认拒绝。
+
+模式中包含 `*`、`?` 或 `[...]` 时视为 glob，否则视为精确匹配。路径统一转换为 `/` 分隔的工作区相对路径后再匹配。本会话放行和永久放行都生成当前权限目标的精确 allow 规则，不自动扩大成 glob。永久写入只向本地 YAML 的 `allow` 追加规则，已有相同规则时不重复写入，并保留原有 `mode`、`deny` 和其他 allow 规则。
 
 ## 文件组织
 
-```text
-src/mycode/
-  prompts/
-    __init__.py
-    modules.py              # 固定/可选提示模块
-    builder.py              # PromptBuilder、PromptBundle、EnvironmentInfo
-    modes.py                # 模式动态指令与注入频率
-  tools/
-    descriptions.py         # ToolSpec 描述强化
-  providers/
-    base.py                 # ChatRequest + LLMProvider 协议
-    openai.py               # OpenAI/DeepSeek 请求转换和缓存字段解析
-    anthropic.py            # Anthropic 请求转换和缓存字段解析
-  agent/
-    runner.py               # 构造 ChatRequest，移除用户文本模式拼接
-  cli.py                    # cache usage 展示
-  types.py                  # TokenUsage 扩展；必要时共享基础类型
+### 新建
 
-tests/
-  test_prompts.py           # 模块顺序、稳定/动态分离、模式注入频率
-  test_tool_descriptions.py # 工具描述强化规则
-  test_providers.py         # Provider payload 和缓存字段解析
-  test_agent_runner.py      # Plan/Do/default 请求构造回归
-  test_cli.py               # cache usage 展示
+- `src/mycode/permissions/__init__.py`：导出权限系统公共接口。
+- `src/mycode/permissions/models.py`：权限模式、规则层、请求、决定、审批选择和配置集合。
+- `src/mycode/permissions/blacklist.py`：不可配置的灾难性命令正则与匹配逻辑。
+- `src/mycode/permissions/targets.py`：各工具的权限目标提取和规范化。
+- `src/mycode/permissions/sandbox.py`：文件路径强制沙箱与命令显式路径检查。
+- `src/mycode/permissions/rules.py`：精确/glob 匹配、同层冲突与跨层优先级。
+- `src/mycode/permissions/config.py`：三层 YAML 加载、严格校验、模式解析和本地规则原子写入。
+- `src/mycode/permissions/approval.py`：审批协议、终端审批器和无交互拒绝实现。
+- `src/mycode/permissions/service.py`：五层判定编排、会话规则维护和审批结果处理。
+- `tests/test_permissions_blacklist.py`：黑名单测试。
+- `tests/test_permissions_sandbox.py`：路径沙箱测试。
+- `tests/test_permissions_rules.py`：规则匹配和优先级测试。
+- `tests/test_permissions_config.py`：分层配置和永久写入测试。
+- `tests/test_permissions_service.py`：模式、审批和五层编排测试。
 
-docs/
-  manual-eval-structured-prompts.md
-```
+### 修改
+
+- `src/mycode/tools/executor.py`：在工具实现前调用权限服务。
+- `src/mycode/tools/search.py`：为 `search_code` 增加可选搜索范围参数，并保证范围在工作区内。
+- `src/mycode/agent/executor.py`：向单个 ToolExecutor 传递同一权限服务，维持串行副作用和受控并发读取。
+- `src/mycode/agent/runner.py`：接收并传递权限服务；拒绝结果继续正常回灌。
+- `src/mycode/session.py`：旧会话入口同样经过权限层；未注入交互审批时安全拒绝。
+- `src/mycode/cli.py`：增加权限模式参数、加载三层配置、创建终端审批器并展示权限结果。
+- `src/mycode/types.py`：补充权限集成所需的类型引用或上下文字段。
+- `.gitignore`：忽略 `.mycode/permissions.local.yaml`。
+- `README.md`：记录配置路径、YAML 示例、三档模式、审批选项、安全边界和已知限制。
+- `config.example.yaml`：仅补充权限配置位置说明；Provider 配置与权限 YAML 保持分离。
+- 现有工具、Agent、CLI、配置和会话测试：更新构造方式并补充权限回归及拒绝后继续循环场景。
+
+## 需求覆盖
+
+- F1、F14-F18：统一 PermissionService、审批接口、ToolExecutor 和 Agent Loop 集成。
+- F2-F3：blacklist 模块与不可覆盖的首层判定。
+- F4-F5：sandbox 模块、符号链接解析和命令显式路径检查。
+- F6-F9：targets、rules、三层配置和会话规则。
+- F10-F13：独立 PermissionMode、CLI 覆盖、审批范围和本地写入。
+- F19：严格 YAML 校验、启动错误和 fail-closed 行为。
+- N1-N10：纯判定模块、锁、原子写入、结构化结果、回归测试和文档说明。
 
 ## 技术决策
 
 | 决策点 | 选择 | 理由 |
-|--------|------|------|
-| 提示构建位置 | 新增 `mycode.prompts` 包 | 保持 Agent 只管流程，Provider 只管协议转换，便于测试稳定提示文本。 |
-| Provider 入参 | 使用 `ChatRequest` 替代 `messages, tools` 两参数 | 系统提示、动态消息和缓存标记需要结构化传输，继续加参数会让接口膨胀。 |
-| 动态补充消息形式 | 系统级消息 + `<mewcode_runtime_instruction>` 标签 | 满足“不污染用户输入”和“模型知道这是运行时指令”的需求。 |
-| 环境信息位置 | 动态系统消息 `<mewcode_environment>`，位于固定模块之后、可选模块之前 | 环境会变化，不应进入稳定缓存段，同时保持用户指定的提示优先级。 |
-| 模式注入频率 | 默认首轮完整、每 3 轮完整、其他精简 | 成本和可见性折中；后续可放入配置，本阶段先作为 AgentConfig 默认值。 |
-| 工具描述强化 | 通过 `reinforce_tool_specs` 包装已有 ToolSpec | 不改变工具执行类和 schema，降低回归风险。 |
-| Anthropic 缓存 | 稳定 system block 和工具定义使用 `cache_control` | Anthropic 原生支持 content block 缓存控制，最符合稳定/动态分离。 |
-| OpenAI/DeepSeek 缓存 | 解析已知缓存字段，缓存标记采用能力检测/兼容降级 | OpenAI 兼容服务字段差异大，不能让缓存能力破坏普通请求。 |
-| 缓存不可验证 | `TokenUsage.cache_unavailable=True` | 用户能区分“没有命中”和“Provider 没返回指标”。 |
-| 人工对比 | 文档化场景，不做自动评分 | 符合 spec 中“不做自动化评估”的边界。 |
+|---|---|---|
+| 权限拦截位置 | ToolExecutor 前置统一拦截 | 覆盖 AgentRunner 和旧 ChatSession，避免旁路 |
+| 黑名单来源 | 代码内只读正则常量 | 保证配置和审批无法覆盖 |
+| 路径边界判断 | `Path.resolve` 后使用层级关系 | 防止字符串前缀和符号链接逃逸 |
+| 命令兼容性 | 保留 shell，检查可识别显式路径 | 保留现有能力，同时落实本阶段可验证边界 |
+| 规则格式 | YAML 的 `allow` / `deny` 字符串列表 | 直接符合 `工具名(模式)` 约定 |
+| glob 实现 | 大小写敏感匹配 | 与命令和 POSIX 路径语义一致且可预测 |
+| 模式来源 | CLI > 本地 > 项目 > 用户 > default | 支持本次显式切换和分层默认 |
+| 默认审批 | 无交互时拒绝 | 满足 fail-closed |
+| 会话状态 | 进程内精确规则 | 生命周期清晰且不污染磁盘 |
+| 永久状态 | 本地 YAML 原子追加 | 不影响团队和用户全局配置 |
+| 拒绝传播 | `ToolResult(ok=False)` | 复用现有回灌机制，不新增停止条件 |
+| 并发 | 审批和规则写入加锁，获准只读工具再并发 | 避免交互和持久化竞态 |
 
-## Spec 覆盖
+## 已知限制与后续工作
 
-- F1-F4、AC1-AC4：由 `mycode.prompts.modules` 和 `PromptBuilder` 覆盖。
-- F5-F8、AC5-AC7：由 `PromptBundle`、`ChatRequest` 和 Provider 转换覆盖。
-- F9-F11、AC8-AC10：由 `mycode.prompts.modes` 和 `AgentRunner` 模式处理覆盖。
-- F12-F14、AC11-AC13：由固定提示模块和 `tools.descriptions` 双重强化覆盖。
-- F15-F18、AC14-AC16：由 Provider `ChatRequest` 转换和 `TokenUsage` 扩展覆盖。
-- F19、AC17：由 `docs/manual-eval-structured-prompts.md` 覆盖。
-- F20、AC18-AC20：由 Agent、Provider、CLI 回归测试覆盖。
+本阶段不提供操作系统级文件访问隔离。命令工具会拦截可识别的显式越界路径，但程序通过环境变量、用户配置、运行库或内部逻辑产生的隐式项目外访问，只有引入 OS 沙箱或容器后才能可靠限制。该强化项不在本阶段实现，不得在文档中宣称命令工具已经具备完整运行时文件系统隔离。

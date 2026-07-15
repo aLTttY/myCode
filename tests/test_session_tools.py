@@ -2,6 +2,7 @@ from collections.abc import Iterator
 from pathlib import Path
 
 from mycode.providers.base import ChatRequest
+from mycode.permissions.service import PermissionService
 from mycode.session import ChatSession
 from mycode.tools.registry import create_default_registry
 from mycode.types import Message, StreamEvent, ToolContext
@@ -22,7 +23,12 @@ class ScriptedProvider:
 
 
 def make_session(provider: ScriptedProvider, tmp_path: Path) -> ChatSession:
-    return ChatSession(provider, create_default_registry(), ToolContext(workspace_root=tmp_path))
+    return ChatSession(
+        provider,
+        create_default_registry(),
+        ToolContext(workspace_root=tmp_path),
+        PermissionService.with_mode("allow"),
+    )
 
 
 def test_tool_success_followup_appends_history(tmp_path: Path) -> None:
@@ -60,6 +66,23 @@ def test_tool_failure_is_fed_back(tmp_path: Path) -> None:
     list(make_session(provider, tmp_path).send("read missing"))
 
     assert "文件不存在" in provider.calls[1].messages[-1].content
+
+
+def test_session_without_approval_handler_denies_unmatched_tool(tmp_path: Path) -> None:
+    (tmp_path / "a.txt").write_text("hello", encoding="utf-8")
+    provider = ScriptedProvider(
+        [
+            StreamEvent(type="tool_call_delta", tool_call_id="1", tool_name="read_file", arguments_delta='{"path": "a.txt"}'),
+            StreamEvent(type="tool_call_done", tool_call_id="1"),
+            StreamEvent(type="message_done"),
+        ],
+        [StreamEvent(type="text_delta", text="denied"), StreamEvent(type="message_done")],
+    )
+    session = ChatSession(provider, create_default_registry(), ToolContext(workspace_root=tmp_path))
+
+    list(session.send("read file"))
+
+    assert "user_denied" in provider.calls[1].messages[-1].content
 
 
 def test_unknown_tool_is_fed_back(tmp_path: Path) -> None:

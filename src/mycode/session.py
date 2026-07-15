@@ -5,6 +5,7 @@ from collections.abc import Iterator, Sequence
 from dataclasses import asdict
 from pathlib import Path
 
+from .permissions.service import PermissionService
 from .providers.base import LLMProvider, plain_chat_request
 from .tools.executor import ToolExecutor
 from .tools.registry import ToolRegistry
@@ -17,10 +18,12 @@ class ChatSession:
         provider: LLMProvider,
         tool_registry: ToolRegistry | None = None,
         tool_context: ToolContext | None = None,
+        permission_service: PermissionService | None = None,
     ) -> None:
         self.provider = provider
         self.tool_registry = tool_registry
         self.tool_context = tool_context or ToolContext(workspace_root=Path.cwd())
+        self.permission_service = permission_service or PermissionService.with_mode("default")
         self.messages: list[Message] = []
 
     def send(self, user_text: str) -> Iterator[StreamEvent]:
@@ -36,7 +39,7 @@ class ChatSession:
             return
 
         self.messages.append(Message(role="assistant", content=assistant_text, tool_calls=tuple(tool_calls)))
-        executor = ToolExecutor(self.tool_registry, self.tool_context)
+        executor = ToolExecutor(self.tool_registry, self.tool_context, self.permission_service)
 
         for call in tool_calls:
             yield StreamEvent(type="tool_started", tool_call_id=call.id, tool_name=call.name)

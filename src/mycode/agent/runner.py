@@ -11,6 +11,7 @@ from mycode.agent.config import AgentConfig, AgentRequest
 from mycode.agent.events import AgentEvent, done_event, progress_event
 from mycode.agent.executor import BatchToolExecutor
 from mycode.agent.tools import ToolBatcher, create_readonly_registry
+from mycode.permissions.service import PermissionService
 from mycode.prompts.builder import EnvironmentInfo, PromptBuilder
 from mycode.providers.base import ChatRequest, LLMProvider
 from mycode.tools.descriptions import reinforce_tool_specs
@@ -25,11 +26,13 @@ class AgentRunner:
         full_registry: ToolRegistry,
         tool_context: ToolContext,
         config: AgentConfig = AgentConfig(),
+        permission_service: PermissionService | None = None,
     ) -> None:
         self.provider = provider
         self.full_registry = full_registry
         self.tool_context = tool_context
         self.config = config
+        self.permission_service = permission_service or PermissionService.with_mode("default")
         self.messages: list[Message] = []
 
     def run(
@@ -78,7 +81,7 @@ class AgentRunner:
 
             batches = ToolBatcher().batch(collected.tool_calls)
             tool_results: list[tuple[str, ToolResult]] = []
-            batch_executor = BatchToolExecutor(registry, self.tool_context)
+            batch_executor = BatchToolExecutor(registry, self.tool_context, self.permission_service)
             for item in batch_executor.execute_batches(batches, cancellation):
                 if isinstance(item, AgentEvent):
                     yield item

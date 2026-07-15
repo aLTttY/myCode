@@ -2,6 +2,7 @@ from collections.abc import Iterator
 from pathlib import Path
 
 from mycode.providers.base import ChatRequest
+from mycode.permissions.service import PermissionService
 from mycode.session import ChatSession
 from mycode.tools.registry import create_default_registry
 from mycode.types import StreamEvent, ToolContext
@@ -25,7 +26,12 @@ class ToolCallProvider:
 
 
 def session(provider: ToolCallProvider, tmp_path: Path) -> ChatSession:
-    return ChatSession(provider, create_default_registry(), ToolContext(workspace_root=tmp_path))
+    return ChatSession(
+        provider,
+        create_default_registry(),
+        ToolContext(workspace_root=tmp_path),
+        PermissionService.with_mode("allow"),
+    )
 
 
 def test_single_tool_call_json_fragments(tmp_path: Path) -> None:

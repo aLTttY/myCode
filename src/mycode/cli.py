@@ -11,6 +11,9 @@ from .agent.cancellation import CancellationToken
 from .agent.config import AgentRequest
 from .agent.runner import AgentRunner
 from .config import load_config
+from .permissions.approval import TerminalApprovalHandler
+from .permissions.config import LocalRuleStore, PermissionConfigLoader
+from .permissions.service import PermissionService
 from .providers.factory import create_provider
 from .tools.registry import create_default_registry
 from .types import ConfigError, ProviderError, TokenUsage, ToolContext
@@ -32,12 +35,18 @@ def main(argv: Sequence[str] | None = None) -> int:
     # 解析命令行参数，例如：mycode --config custom.yaml
     parser = argparse.ArgumentParser(
         prog="mycode",
-        description="myCode 命令行 AI 编程助手",
+        description="Mycode 命令行 AI 编程助手",
     )
     parser.add_argument(
         "--config",
         default=DEFAULT_CONFIG_PATH,
         help="配置文件路径",
+    )
+    parser.add_argument(
+        "--permission-mode",
+        choices=("strict", "default", "allow"),
+        default=None,
+        help="覆盖本次进程的权限模式",
     )
     args = parser.parse_args(argv)
 
@@ -45,6 +54,21 @@ def main(argv: Sequence[str] | None = None) -> int:
         # 加载配置，并根据配置创建对应的大模型 Provider
         config = load_config(Path(args.config))
         provider = create_provider(config)
+        registry = create_default_registry()
+        known_tools = {spec.name for spec in registry.tool_specs()}
+        workspace_root = Path.cwd()
+        permission_config = PermissionConfigLoader(known_tools).load(
+            workspace_root,
+            args.permission_mode,
+        )
+        permission_service = PermissionService(
+            permission_config,
+            TerminalApprovalHandler(input_func=read_user_input),
+            LocalRuleStore(
+                workspace_root / ".mycode" / "permissions.local.yaml",
+                known_tools,
+            ),
+        )
     except ConfigError as exc:
         print(f"配置错误：{exc.user_message}", file=sys.stderr)
         return 1
@@ -53,11 +77,12 @@ def main(argv: Sequence[str] | None = None) -> int:
     # provider 负责调用模型，registry 保存工具，workspace_root 限制工具工作目录
     agent = AgentRunner(
         provider,
-        full_registry=create_default_registry(),
-        tool_context=ToolContext(workspace_root=Path.cwd()),
+        full_registry=registry,
+        tool_context=ToolContext(workspace_root=workspace_root),
+        permission_service=permission_service,
     )
 
-    print("myCode 已启动。输入 /plan 生成计划，/do 执行计划，exit、quit 或 退出 结束。")
+    print("Mycode 已启动。输入 /plan 生成计划，/do 执行计划，exit、quit 或 退出 结束。")
 
     while True:
         try:

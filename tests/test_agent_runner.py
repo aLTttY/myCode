@@ -6,6 +6,7 @@ from pathlib import Path
 from mycode.agent.cancellation import CancellationToken
 from mycode.agent.config import AgentConfig, AgentRequest
 from mycode.agent.runner import AgentRunner
+from mycode.permissions.service import PermissionService
 from mycode.providers.base import ChatRequest, LLMProvider
 from mycode.tools.registry import create_default_registry
 from mycode.types import ProviderError, StreamEvent, ToolContext
@@ -35,7 +36,13 @@ class BrokenProvider:
 
 
 def runner(provider: LLMProvider, tmp_path: Path, config: AgentConfig = AgentConfig()) -> AgentRunner:
-    return AgentRunner(provider, create_default_registry(), ToolContext(workspace_root=tmp_path), config)
+    return AgentRunner(
+        provider,
+        create_default_registry(),
+        ToolContext(workspace_root=tmp_path),
+        config,
+        PermissionService.with_mode("allow"),
+    )
 
 
 def tool_call_events(tool_call_id: str, name: str, arguments_json: str) -> list[StreamEvent]:
@@ -58,6 +65,26 @@ def test_agent_runner_completed_after_multiple_iterations(tmp_path: Path) -> Non
     assert [event.stop_reason for event in events if event.type == "done"] == ["completed"]
     assert len(provider.calls) == 2
     assert provider.calls[1].messages[-1].role == "tool"
+
+
+def test_permission_denial_is_fed_back_and_loop_continues(tmp_path: Path) -> None:
+    (tmp_path / "a.txt").write_text("hello", encoding="utf-8")
+    provider = ScriptedProvider([
+        tool_call_events("1", "read_file", '{"path": "a.txt"}'),
+        [StreamEvent(type="text_delta", text="used another approach"), StreamEvent(type="message_done")],
+    ])
+    agent = AgentRunner(
+        provider,
+        create_default_registry(),
+        ToolContext(workspace_root=tmp_path),
+        permission_service=PermissionService.with_mode("default"),
+    )
+
+    events = list(agent.run(AgentRequest("read it")))
+
+    assert events[-1].stop_reason == "completed"
+    assert len(provider.calls) == 2
+    assert "user_denied" in provider.calls[1].messages[-1].content
 
 
 def test_agent_runner_writes_each_tool_result_to_history(tmp_path: Path) -> None:
