@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from threading import RLock
 
-from mycode.tools.safety import is_read_tool
+from mycode.tool_safety import is_read_tool
 from mycode.types import ToolCall, ToolContext
 
 from .approval import ApprovalHandler, DenyApprovalHandler

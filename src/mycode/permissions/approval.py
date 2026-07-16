@@ -38,6 +38,8 @@ _MENU_OPTIONS: tuple[tuple[str, ApprovalChoice], ...] = (
     ("本会话同意", "allow_session"),
 )
 
+_CHOICE_LABELS = {choice: label for label, choice in _MENU_OPTIONS}
+
 
 def safe_target_summary(target: str, max_chars: int = 300) -> str:
     redacted = _SECRET_PATTERN.sub(r"\1=<redacted>", target)
@@ -121,8 +123,10 @@ class TerminalApprovalHandler:
         self.output_func(f"[permission] 目标：{safe_target_summary(approval.target)}")
         self.output_func(f"[permission] 原因：{approval.reason}")
         try:
-            return self.selector()
+            choice = self.selector()
         except (EOFError, KeyboardInterrupt, OSError):
-            return "deny"
+            choice = "deny"
         except Exception:  # noqa: BLE001 - 交互审批异常必须安全拒绝。
-            return "deny"
+            choice = "deny"
+        self.output_func(f"[permission] 已选择：{_CHOICE_LABELS.get(choice, '不同意')}")
+        return choice if choice in _CHOICE_LABELS else "deny"

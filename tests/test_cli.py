@@ -140,6 +140,7 @@ def test_terminal_approval_shows_context_and_uses_selector() -> None:
     assert choice == "allow_session"
     assert any("run_command" in line for line in output)
     assert any("ls -la" in line for line in output)
+    assert any("已选择：本会话同意" in line for line in output)
 
 
 @pytest.mark.parametrize(
@@ -166,6 +167,14 @@ def test_terminal_approval_fails_closed_on_selector_error() -> None:
 
     handler = TerminalApprovalHandler(selector=fail)
     assert handler.request(ApprovalPrompt("run_command", "ls", "test")) == "deny"
+
+
+def test_terminal_approval_invalid_choice_fails_closed() -> None:
+    output: list[str] = []
+    handler = TerminalApprovalHandler(selector=lambda: "invalid", output_func=output.append)  # type: ignore[arg-type]
+
+    assert handler.request(ApprovalPrompt("write_file", "hello.md", "test")) == "deny"
+    assert any("已选择：不同意" in line for line in output)
 
 
 def test_cli_returns_nonzero_on_config_error(monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]) -> None:

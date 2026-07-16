@@ -83,7 +83,7 @@
 ## 本次验收记录
 
 - [x] Python 编译通过。证据：使用 `/tmp/mycode-pycache` 运行 `compileall`，退出码为 0。
-- [x] 完整测试通过。证据：`203 passed in 1.89s`。
+- [x] 完整测试通过。证据：基础改造为 `203 passed`；补充会话选择日志与循环导入回归后为 `205 passed`。
 - [x] 补丁格式通过。证据：`git diff --check` 无输出。
 - [x] 永久审批已移除。证据：在 `src`、`tests` 中搜索 `allow_permanent|user_allow_permanent` 无匹配。
 - [x] 审批持久化接线已移除。证据：在 CLI、权限服务和审批模块中搜索 `LocalRuleStore|add_exact_allow` 无匹配。

@@ -3,7 +3,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 
 from mycode.tools.registry import ToolRegistry
-from mycode.tools.safety import READ_TOOLS, ToolSafety, classify_tool
+from mycode.tool_safety import READ_TOOLS, ToolSafety, classify_tool
 from mycode.types import ToolCall
 
 

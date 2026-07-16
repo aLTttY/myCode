@@ -109,6 +109,19 @@ def test_session_allow_lasts_only_for_service_instance(tmp_path: Path) -> None:
     assert not fresh.authorize(tool_call, ToolContext(tmp_path)).allowed
 
 
+def test_session_allow_prevents_second_write_approval(tmp_path: Path) -> None:
+    approval = FakeApproval(["allow_session"])
+    service = PermissionService(config(), approval)
+    tool_call = call("write_file", path="hello.md")
+
+    first = service.authorize(tool_call, ToolContext(tmp_path))
+    second = service.authorize(tool_call, ToolContext(tmp_path))
+
+    assert first.reason_code == "user_allow_session"
+    assert second.reason_code == "rule_allow"
+    assert len(approval.calls) == 1
+
+
 def test_manual_local_rule_is_loaded_by_fresh_service(tmp_path: Path) -> None:
     local_rule = parse_rule("run_command(git status)", "allow", "local", TOOLS)
     fresh = PermissionService(config(local=(local_rule,)), FakeApproval([]))

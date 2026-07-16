@@ -4,7 +4,7 @@
 
 | 操作 | 文件 | 职责 |
 |---|---|---|
-| 新建 | `src/mycode/tools/safety.py` | 集中定义专用只读工具集合和安全分类 |
+| 新建 | `src/mycode/tool_safety.py` | 集中定义专用只读工具集合并避免权限/工具循环导入 |
 | 修改 | `src/mycode/agent/tools.py` | 复用共享分类，保持 Plan Mode 和批处理语义 |
 | 修改 | `src/mycode/permissions/models.py` | 删除交互式永久审批结果 |
 | 修改 | `src/mycode/permissions/service.py` | 增加只读快速路径并移除审批持久化分支 |
@@ -26,7 +26,7 @@
 
 ## T1：建立共享工具安全分类
 
-**文件：** `src/mycode/tools/safety.py`、`src/mycode/agent/tools.py`、`tests/test_agent_tools.py`
+**文件：** `src/mycode/tool_safety.py`、`src/mycode/agent/tools.py`、`tests/test_agent_tools.py`
 
 **依赖：** 无
 

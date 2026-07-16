@@ -128,7 +128,7 @@ def request(self, approval: ApprovalPrompt) -> ApprovalChoice: ...
 
 ## 模块设计
 
-### `tools.safety`
+### `tool_safety`
 
 **职责：** 集中声明工具安全分类。
 
@@ -251,7 +251,7 @@ run_command("ls -la")
 
 ### 新建
 
-- `src/mycode/tools/safety.py`：共享只读工具集合和安全分类函数。
+- `src/mycode/tool_safety.py`：共享只读工具集合和安全分类函数；位于顶层以避免权限模块导入 `tools` 包时触发执行器循环依赖。
 
 ### 修改
 
@@ -289,7 +289,7 @@ run_command("ls -la")
 |---|---|---|
 | 自动执行范围 | 固定三个专用工具 | 与批准的方案 A 一致，边界清晰 |
 | 自动放行位置 | `PermissionService` 目标校验之后 | 所有入口一致，同时保留参数和工作区保护 |
-| 共享分类 | 独立 `tools.safety` 模块 | 避免 Agent 与权限模块重复名单或循环依赖 |
+| 共享分类 | 独立顶层 `tool_safety` 模块 | 避免重复名单，也避免权限模块通过 `tools.__init__` 反向导入执行器 |
 | 历史只读规则 | 保持可解析，但执行时忽略 | 满足直接执行并保持配置兼容 |
 | Shell 查看命令 | 继续视为有副作用 | 不引入不可靠的 shell 语义识别 |
 | 自动放行结果 | 返回 `readonly_allow` | 保持工具执行可观察、可测试 |
