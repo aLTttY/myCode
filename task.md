@@ -1,331 +1,222 @@
-# Mycode 五层权限系统 Tasks
+# Mycode 只读自动执行与方向键审批 Tasks
 
 ## 文件清单
 
 | 操作 | 文件 | 职责 |
 |---|---|---|
-| 新建 | `src/mycode/permissions/__init__.py` | 导出权限系统公共接口 |
-| 新建 | `src/mycode/permissions/models.py` | 权限模式、规则、请求、决定、审批和配置类型 |
-| 新建 | `src/mycode/permissions/blacklist.py` | 不可配置的灾难性命令黑名单 |
-| 新建 | `src/mycode/permissions/targets.py` | 各工具权限目标提取与规范化 |
-| 新建 | `src/mycode/permissions/sandbox.py` | 文件路径沙箱和命令显式路径检查 |
-| 新建 | `src/mycode/permissions/rules.py` | 规则解析、匹配、冲突处理和层级判定 |
-| 新建 | `src/mycode/permissions/config.py` | 三层 YAML 加载、校验、模式解析和本地规则写入 |
-| 新建 | `src/mycode/permissions/approval.py` | 审批协议、终端审批和无交互拒绝实现 |
-| 新建 | `src/mycode/permissions/service.py` | 五层权限判定编排与会话状态 |
-| 修改 | `src/mycode/tools/executor.py` | 在工具实现前统一执行权限判定 |
-| 修改 | `src/mycode/tools/search.py` | 为代码搜索增加工作区内的可选搜索范围 |
-| 修改 | `src/mycode/agent/executor.py` | 把权限服务传入批量工具执行器 |
-| 修改 | `src/mycode/agent/runner.py` | 注入权限服务并保持拒绝结果回灌 |
-| 修改 | `src/mycode/session.py` | 旧会话工具调用接入同一权限层 |
-| 修改 | `src/mycode/cli.py` | 权限模式参数、配置加载和终端审批 |
-| 修改 | `src/mycode/types.py` | 补充权限集成所需的结构化类型或结果字段 |
-| 修改 | `.gitignore` | 忽略本地私有权限配置 |
-| 修改 | `README.md` | 权限使用说明、安全边界和已知限制 |
-| 修改 | `config.example.yaml` | 指向独立权限配置文件和模式入口 |
-| 新建 | `tests/test_permissions_blacklist.py` | 黑名单不可绕过测试 |
-| 新建 | `tests/test_permissions_sandbox.py` | 路径、符号链接和命令显式路径测试 |
-| 新建 | `tests/test_permissions_rules.py` | 精确/glob、冲突和层级优先级测试 |
-| 新建 | `tests/test_permissions_config.py` | YAML 校验、模式优先级和原子写入测试 |
-| 新建 | `tests/test_permissions_service.py` | 三档模式、审批范围和五层编排测试 |
-| 修改 | `tests/test_tools_search.py` | 搜索范围行为与越界回归测试 |
-| 修改 | `tests/test_tool_executor.py` | 权限前置拦截和工具不触达测试 |
-| 修改 | `tests/test_agent_executor.py` | 批量执行与审批串行化测试 |
-| 修改 | `tests/test_agent_runner.py` | 权限拒绝回灌后继续循环测试 |
-| 修改 | `tests/test_session_tools.py` | ChatSession 权限接入和无交互拒绝测试 |
-| 修改 | `tests/test_tool_streaming.py` | 工具流式路径权限回归测试 |
-| 修改 | `tests/test_cli.py` | CLI 模式、配置错误和审批交互测试 |
-| 修改 | 其他受构造签名影响的现有测试 | 保持既有行为回归通过 |
+| 新建 | `src/mycode/tools/safety.py` | 集中定义专用只读工具集合和安全分类 |
+| 修改 | `src/mycode/agent/tools.py` | 复用共享分类，保持 Plan Mode 和批处理语义 |
+| 修改 | `src/mycode/permissions/models.py` | 删除交互式永久审批结果 |
+| 修改 | `src/mycode/permissions/service.py` | 增加只读快速路径并移除审批持久化分支 |
+| 修改 | `src/mycode/permissions/approval.py` | 实现三选项方向键审批菜单 |
+| 修改 | `src/mycode/cli.py` | 接入新菜单并解除审批链路与本地规则写入器的连接 |
+| 修改 | `src/mycode/tools/search.py` | 阻止查找和搜索读取项目外符号链接 |
+| 修改 | `tests/test_agent_tools.py` | 验证共享分类和只读注册表 |
+| 修改 | `tests/test_permissions_service.py` | 验证只读快速路径、三种审批结果和受控权限 |
+| 修改 | `tests/test_cli.py` | 验证方向键、回车、默认拒绝和异常降级 |
+| 修改 | `tests/test_permissions_config.py` | 验证手工本地规则仍可加载 |
+| 修改 | `tests/test_tool_executor.py` | 验证只读执行及拒绝工具不进入实现层 |
+| 修改 | `tests/test_agent_executor.py` | 验证只读并发无审批、副作用调用仍串行 |
+| 修改 | `tests/test_permissions_sandbox.py` | 验证只读目标的路径边界 |
+| 修改 | `tests/test_tools_search.py` | 验证项目外符号链接不被查找或读取 |
+| 修改 | `tests/test_session_tools.py` | 验证无审批会话仍可执行合法只读工具 |
+| 修改 | `tests/test_agent_runner.py` | 验证 Agent 中只读执行和受控拒绝回灌 |
+| 修改 | `README.md` | 说明只读自动执行、三选项菜单和手工本地规则 |
+| 修改 | `config.example.yaml` | 补充只读规则及手工本地规则说明 |
 
-## T1: 建立权限模型与规则引擎
+## T1：建立共享工具安全分类
 
-**文件：**
-
-- `src/mycode/permissions/__init__.py`
-- `src/mycode/permissions/models.py`
-- `src/mycode/permissions/rules.py`
-- `tests/test_permissions_rules.py`
+**文件：** `src/mycode/tools/safety.py`、`src/mycode/agent/tools.py`、`tests/test_agent_tools.py`
 
 **依赖：** 无
 
-**覆盖：** F6-F11，N1
-
 **步骤：**
 
-1. 定义 `PermissionMode`、`PermissionRule`、`PermissionLayer`、`PermissionRequest`、`PermissionDecision`、`ApprovalChoice`、`ApprovalPrompt` 和 `PermissionConfigSet`。
-2. 实现完整锚定的 `工具名(模式)` 解析，拒绝空工具名、空模式和括号外多余内容。
-3. 根据 `*`、`?`、`[...]` 判断精确或 glob 匹配，统一采用大小写敏感语义。
-4. 实现同层“精确优先、同类型 deny 优先”。
-5. 实现跨层“会话 > 本地 > 项目 > 用户”，某层有命中后不再检查低层。
-6. 导出后续模块需要的稳定公共类型，避免权限模块间形成循环依赖。
+1. 新建不依赖 Agent 或权限模块的共享安全分类模块。
+2. 使用不可变集合声明 `read_file`、`find_files`、`search_code`。
+3. 提供安全分类和只读判断函数；未知工具默认归为有副作用。
+4. 让 Agent 批处理和 Plan Mode 注册表复用共享分类。
+5. 验证 `run_command`、写入、编辑和未知工具不会被误判为只读。
 
 **验证：**
 
 ```bash
-PYTHONPATH=src .venv/bin/python -m pytest tests/test_permissions_rules.py
+PYTHONPATH=src .venv/bin/python -m pytest tests/test_agent_tools.py
 ```
 
-期望：精确/glob 匹配、同层冲突、跨层冲突和无匹配场景全部通过。
+期望：共享分类、批次分组和 Plan Mode 工具集合测试全部通过。
 
-## T2: 实现黑名单、沙箱与权限目标
+## T2：实现权限服务只读快速路径
 
-**文件：**
-
-- `src/mycode/permissions/blacklist.py`
-- `src/mycode/permissions/sandbox.py`
-- `src/mycode/permissions/targets.py`
-- `src/mycode/tools/search.py`
-- `tests/test_permissions_blacklist.py`
-- `tests/test_permissions_sandbox.py`
-- `tests/test_tools_search.py`
+**文件：** `src/mycode/permissions/service.py`、`tests/test_permissions_service.py`
 
 **依赖：** T1
 
-**覆盖：** F2-F5、F7，N2、N4
-
 **步骤：**
 
-1. 用不可变代码常量定义灾难性命令正则，覆盖根目录或用户目录破坏、磁盘覆写或格式化、系统目录递归权限修改、关机重启和 fork bomb。
-2. 同时检查原始命令与规范化空白后的命令，支持常见前缀、参数顺序和复合命令片段。
-3. 实现基于 `Path.resolve()` 和路径层级关系的工作区判断，不使用字符串前缀。
-4. 分别覆盖现有路径、待创建路径、绝对路径、`..`、项目内符号链接和项目外符号链接。
-5. 对命令进行词法拆分，识别路径参数、路径型选项值和重定向目标；只拦截可识别的显式越界路径，不宣称限制运行时隐式访问。
-6. 为六个已注册工具实现稳定权限目标解析；未知工具或关键参数无效时安全拒绝。
-7. 为 `search_code` 增加可选 `path` 参数，默认 `.`，并把搜索迭代限制在经过沙箱验证的范围内。
-8. 确保测试仅调用判定逻辑，不执行任何黑名单命令。
+1. 保留权限目标解析作为所有工具授权的第一步。
+2. 目标校验成功后，对共享集合中的工具返回 `readonly_allow`。
+3. 确认只读调用不进入规则、模式或审批器。
+4. 保持写入、编辑、终端、黑名单和路径沙箱的现有顺序。
+5. 覆盖 strict/default/allow、历史只读 deny、无审批器和 `run_command("ls -la")` 场景。
 
 **验证：**
 
 ```bash
-PYTHONPATH=src .venv/bin/python -m pytest tests/test_permissions_blacklist.py tests/test_permissions_sandbox.py tests/test_tools_search.py
+PYTHONPATH=src .venv/bin/python -m pytest tests/test_permissions_service.py tests/test_permissions_rules.py tests/test_permissions_blacklist.py
 ```
 
-期望：黑名单样例全部硬拒绝；普通开发命令不被黑名单误拒绝；文件与显式命令路径逃逸均被拦截；限定范围搜索正常工作。
+期望：三个专用只读工具直接允许；终端查看命令仍受控；黑名单与受控规则测试通过。
 
-## T3: 实现分层配置与永久规则存储
+## T3：加固只读工具工作区边界
 
-**文件：**
+**文件：** `src/mycode/tools/search.py`、`tests/test_permissions_sandbox.py`、`tests/test_tools_search.py`
 
-- `src/mycode/permissions/config.py`
-- `tests/test_permissions_config.py`
-
-**依赖：** T1
-
-**覆盖：** F6、F8-F10、F13、F19，N2、N6
+**依赖：** T2
 
 **步骤：**
 
-1. 实现用户、项目、本地三个固定配置路径的可选加载。
-2. 使用能检测重复键的安全 YAML 加载器，只接受 `mode`、`allow`、`deny`。
-3. 校验字段类型、权限模式、规则格式和真实注册工具名；缺失文件返回空层，无效文件抛出可理解配置错误。
-4. 按 CLI > 本地 > 项目 > 用户 > `default` 解析有效权限模式。
-5. 实现 `LocalRuleStore.add_exact_allow`：重新读取、严格校验、去重追加、保留已有字段。
-6. 使用同目录临时文件和原子替换写入 `.mycode/permissions.local.yaml`，写入失败不得报告成功。
-7. 验证本地永久写入不会修改项目级或用户级配置。
+1. 保持只读工具的参数和搜索范围校验。
+2. 递归遍历候选文件时解析真实路径并确认仍在工作区。
+3. `find_files` 不返回项目外符号链接文件。
+4. `search_code` 不打开或读取项目外符号链接文件。
+5. 添加绝对路径、`..`、项目外链接及项目内合法链接测试。
 
 **验证：**
 
 ```bash
-PYTHONPATH=src .venv/bin/python -m pytest tests/test_permissions_config.py
+PYTHONPATH=src .venv/bin/python -m pytest tests/test_permissions_sandbox.py tests/test_tools_files.py tests/test_tools_search.py
 ```
 
-期望：三层加载、模式优先级、缺失文件、所有无效配置、去重追加和原子写入场景全部通过。
+期望：合法项目内读取成功，越界读取被拒绝或跳过，项目外内容不出现在结果中。
 
-## T4: 实现审批接口与五层权限服务
+## T4：移除交互式永久同意
 
-**文件：**
+**文件：** `src/mycode/permissions/models.py`、`src/mycode/permissions/service.py`、`src/mycode/cli.py`、`tests/test_permissions_service.py`、`tests/test_permissions_config.py`
 
-- `src/mycode/permissions/approval.py`
-- `src/mycode/permissions/service.py`
-- `src/mycode/permissions/__init__.py`
-- `tests/test_permissions_service.py`
-
-**依赖：** T1、T2、T3
-
-**覆盖：** F1-F3、F8-F18，N1-N7、N10
+**依赖：** T2
 
 **步骤：**
 
-1. 定义可注入的 `ApprovalHandler`，实现始终拒绝的非交互处理器。
-2. 在 `PermissionService` 中按“目标解析、黑名单、沙箱、分层规则、权限模式、审批”固定顺序编排。
-3. 确保黑名单、沙箱和显式 deny 直接拒绝，永远不调用审批器。
-4. 实现 strict 拒绝、default 审批、allow 放行的未命中行为。
-5. 实现拒绝、本次、本会话、永久四种审批结果。
-6. 会话放行添加当前目标的精确内存规则；永久放行通过 `LocalRuleStore` 写入精确规则。
-7. 对审批、会话规则和永久写入使用锁，避免并发提示和状态竞态。
-8. 统一生成不泄露敏感参数的原因码和面向模型的结构化拒绝说明。
-9. 永久写入失败或审批异常时安全拒绝，不留下声称已持久化的状态。
+1. 从 `ApprovalChoice` 删除 `allow_permanent`。
+2. 从权限服务删除永久审批分支和本地规则写入器依赖。
+3. 从 CLI 权限服务构造过程移除 `LocalRuleStore` 接线。
+4. 确认审批结果只可能拒绝、允许本次或创建内存会话规则。
+5. 保留用户、项目、本地 YAML 加载以及本地规则优先级。
+6. 验证手工写入 `.mycode/permissions.local.yaml` 的 allow/deny 在重新加载后仍生效。
 
 **验证：**
 
 ```bash
-PYTHONPATH=src .venv/bin/python -m pytest tests/test_permissions_service.py
+PYTHONPATH=src .venv/bin/python -m pytest tests/test_permissions_service.py tests/test_permissions_config.py tests/test_cli.py
+rg -n "allow_permanent|user_allow_permanent" src tests
 ```
 
-期望：五层顺序、不可覆盖拒绝、三档模式、四种用户决定、会话生命周期、永久写入和无交互拒绝全部通过。
+期望：审批链路不存在永久结果或持久化分支；手工本地规则测试通过。`rg` 不应在实现和有效测试中找到遗留永久审批标识。
 
-## T5: 在 ToolExecutor 建立统一权限门禁
+## T5：实现三选项方向键审批菜单
 
-**文件：**
-
-- `src/mycode/tools/executor.py`
-- `src/mycode/types.py`
-- `tests/test_tool_executor.py`
-- `tests/test_tools_files.py`
-- `tests/test_tools_command.py`
+**文件：** `src/mycode/permissions/approval.py`、`src/mycode/cli.py`、`tests/test_cli.py`
 
 **依赖：** T4
 
-**覆盖：** F1、F4-F5、F16-F17，N3、N8
-
 **步骤：**
 
-1. 为 ToolExecutor 注入 `PermissionService`，且在提交线程执行工具实现前完成权限判断。
-2. 将权限拒绝转换成 `ToolResult(ok=False)`，包含稳定原因码、工具名和安全摘要。
-3. 验证被拒绝时工具实现调用次数为零。
-4. 保留未知工具、超时、工具异常和输出截断的既有结构化行为。
-5. 更新直接构造 ToolExecutor 的测试，显式提供对应权限模式或测试权限服务。
-6. 补充文件工具符号链接逃逸与命令显式路径拦截的执行层回归。
+1. 使用现有 `prompt_toolkit` 创建非全屏内联菜单，不新增依赖。
+2. 菜单只显示“不同意、仅本次同意、本会话同意”。
+3. 默认高亮“不同意”；上下方向键循环移动；回车确认。
+4. 不为 `d`、`o`、`s`、`p` 或其他普通字母绑定提交动作。
+5. `Ctrl+C`、`Ctrl+D`、EOF、非 TTY 和菜单异常统一返回拒绝。
+6. 保留工具名、脱敏目标和审批原因输出，并在菜单结束后清理临时渲染。
+7. 通过可注入输入/输出或选择器测试真实按键序列，无需人工参与。
 
 **验证：**
 
 ```bash
-PYTHONPATH=src .venv/bin/python -m pytest tests/test_tool_executor.py tests/test_tools_files.py tests/test_tools_command.py
+PYTHONPATH=src .venv/bin/python -m pytest tests/test_cli.py
 ```
 
-期望：拒绝调用不触达工具；获准工具、超时和异常路径保持正常；现有文件与命令测试通过。
+期望：上、下、回车、默认拒绝、字母不提交、取消/EOF/非交互拒绝和无永久选项测试全部通过。
 
-## T6: 接入 AgentRunner、批量执行与 ChatSession
+## T6：验证执行入口、并发和 Agent 收尾
 
-**文件：**
+**文件：** `tests/test_tool_executor.py`、`tests/test_agent_executor.py`、`tests/test_session_tools.py`、`tests/test_agent_runner.py`
 
-- `src/mycode/agent/executor.py`
-- `src/mycode/agent/runner.py`
-- `src/mycode/session.py`
-- `tests/test_agent_executor.py`
-- `tests/test_agent_runner.py`
-- `tests/test_session_tools.py`
-- `tests/test_tool_streaming.py`
-
-**依赖：** T5
-
-**覆盖：** F1、F15、F17-F18，N3、N7-N9
+**依赖：** T3、T4、T5
 
 **步骤：**
 
-1. 把同一个权限服务从 AgentRunner 传到 BatchToolExecutor 和每个 ToolExecutor。
-2. 保持有副作用工具串行执行，只让权限判定已通过的只读工具并发运行。
-3. 确保权限拒绝仍产生正常 `tool_result` 事件并写入消息历史。
-4. 添加两轮模型脚本：第一轮调用被拒绝，第二轮选择安全替代方案并完成任务。
-5. 确认权限拒绝不新增 stop reason，也不重置已有未知工具计数逻辑。
-6. 让 ChatSession 使用同一权限服务；未提供交互审批时采用安全拒绝处理器。
-7. 更新受构造签名影响的会话和流式测试。
+1. 验证无审批器时合法只读工具可以执行。
+2. 验证受控工具被拒绝后不调用工具实现。
+3. 验证多个只读调用并发执行且审批器调用次数为零。
+4. 验证写入、编辑和终端调用保持串行。
+5. 验证无审批 ChatSession 可以读取，但未授权受控工具仍拒绝。
+6. 验证 Agent 获得真实只读结果后完成；受控拒绝结构化回灌并在上限内收尾。
 
 **验证：**
 
 ```bash
-PYTHONPATH=src .venv/bin/python -m pytest tests/test_agent_executor.py tests/test_agent_runner.py tests/test_session_tools.py tests/test_tool_streaming.py
+PYTHONPATH=src .venv/bin/python -m pytest tests/test_tool_executor.py tests/test_agent_executor.py tests/test_session_tools.py tests/test_agent_runner.py
 ```
 
-期望：批处理顺序不变；权限拒绝成功回灌并继续迭代；ChatSession 无旁路；既有流式行为通过。
+期望：只读执行、受控拒绝、并发、结果回灌和 Agent 收尾场景全部通过。
 
-## T7: 接入 CLI 权限模式、配置与终端审批
+## T7：更新用户文档和配置说明
 
-**文件：**
+**文件：** `README.md`、`config.example.yaml`
 
-- `src/mycode/cli.py`
-- `tests/test_cli.py`
-- `tests/test_config.py`
-
-**依赖：** T3、T4、T6
-
-**覆盖：** F8、F10-F15、F19，N4-N6、N10
+**依赖：** T3、T5
 
 **步骤：**
 
-1. 增加 `--permission-mode strict|default|allow`，保持 `/plan`、`/do` 语义独立。
-2. 启动时加载三层权限 YAML；配置错误打印明确来源并返回非零状态。
-3. 创建 `TerminalApprovalHandler` 并注入共享权限服务。
-4. 审批提示展示工具名、安全截断并遮蔽敏感值的权限目标、请求原因和四个决定。
-5. 对无效选择继续询问；Ctrl+C 取消当前任务；输入流结束时安全拒绝审批。
-6. 增加 CLI 参数覆盖配置模式、用户拒绝、本次、本会话和永久放行的测试。
-7. 确认普通 CLI 对话、token usage、Plan/Do 解析和既有错误处理继续通过。
+1. 说明三个专用只读工具无需规则、模式或审批。
+2. 说明只读工具仍受参数和工作区边界保护。
+3. 说明历史只读规则不影响专用只读工具执行。
+4. 说明 `run_command` 即使查看文件也仍受控。
+5. 把四选项字母输入说明替换为三选项方向键菜单。
+6. 明确交互审批不会写入权限文件，但用户仍可手工维护本地 YAML。
 
 **验证：**
 
 ```bash
-PYTHONPATH=src .venv/bin/python -m pytest tests/test_cli.py tests/test_config.py
+rg -n "read_file|find_files|search_code|run_command|方向键|本会话|permissions.local.yaml" README.md config.example.yaml
+rg -n "\[d\]|\[o\]|\[s\]|\[p\]|永久同意" README.md config.example.yaml
 ```
 
-期望：CLI 模式优先级、审批交互、配置错误与既有命令行行为全部通过。
+期望：新行为说明完整；第二条搜索不应发现旧字母菜单或永久同意说明。
 
-## T8: 更新配置说明与安全文档
+## T8：全量回归和变更检查
 
-**文件：**
+**文件：** 全部变更文件
 
-- `.gitignore`
-- `README.md`
-- `config.example.yaml`
-
-**依赖：** T7
-
-**覆盖：** N5、N8、N10，以及已知限制
+**依赖：** T1-T7
 
 **步骤：**
 
-1. 将 `.mycode/permissions.local.yaml` 加入 `.gitignore`，不忽略项目共享 `.mycode/permissions.yaml`。
-2. 在 README 记录三个配置路径、统一 YAML 格式、规则目标、精确/glob 判定和层级优先级。
-3. 说明 strict、default、allow 与 Plan/Do 的区别。
-4. 说明拒绝、本次、本会话、永久四个审批选择及永久规则写入位置。
-5. 说明黑名单与路径沙箱不可覆盖，并明确命令运行时隐式文件访问不受本阶段强隔离。
-6. 在 Provider 配置示例中只加入权限配置位置提示，避免把两类配置混为一个 YAML。
-7. 检查所有新增文档统一使用 `Mycode`，不出现旧项目名称。
+1. 编译 Python 源码并检查导入关系。
+2. 运行完整测试套件。
+3. 检查补丁空白错误和未完成占位符。
+4. 对照 `spec.md` AC1-AC30 逐项收集证据。
+5. 确认没有扩展到 shell 只读识别、网络沙箱或其他未批准范围。
 
 **验证：**
 
 ```bash
-rg -n "permissions\.local\.yaml|permission-mode|strict|default|allow|隐式文件访问" README.md config.example.yaml .gitignore
-rg -n "Mycode" README.md config.example.yaml src tests
-```
-
-期望：权限入口、安全边界和已知限制均可检索；项目文案中不出现旧名称。
-
-## T9: 执行全量回归与端到端验收准备
-
-**文件：**
-
-- `tests/test_agent_runner.py`
-- `tests/test_cli.py`
-- 所有因集成暴露问题而需要修正的本任务范围内文件
-
-**依赖：** T1-T8
-
-**覆盖：** AC1-AC24，N8-N9
-
-**步骤：**
-
-1. 建立端到端场景：default 模式首次调用请求审批，拒绝结果回灌，模型下一轮改用获准工具并完成。
-2. 建立端到端场景：永久放行写入本地 YAML，重新创建权限服务后相同目标直接命中。
-3. 建立端到端场景：allow 模式和最高优先级 allow 规则都不能覆盖黑名单或路径沙箱。
-4. 建立端到端场景：Plan Mode 仅暴露只读工具，且只读工具仍经过权限系统。
-5. 运行全部测试，修复权限改造引入的回归并重复执行直到通过。
-6. 执行格式与命名检查，确认没有 TODO、TBD、旧项目名称或文档宣称过度。
-
-**验证：**
-
-```bash
+PYTHONPYCACHEPREFIX=/tmp/mycode-pycache PYTHONPATH=src .venv/bin/python -m compileall -q src
 PYTHONPATH=src .venv/bin/python -m pytest
 git diff --check
-rg -n "TODO|TBD" spec.md plan.md task.md src tests README.md config.example.yaml || true
-rg -n "Mycode" spec.md plan.md task.md README.md config.example.yaml
+rg -n "TO""DO|TB""D" src tests README.md config.example.yaml
 ```
 
-期望：全量测试通过；diff 无空白错误；本阶段文件无占位符或旧名称；端到端测试能证明拒绝后 Agent Loop 继续运行。
+期望：编译、全量测试和补丁检查通过；实现和用户文档中没有新增未完成占位符。
 
 ## 执行顺序
 
 ```text
-T1 -> T2 -> T3 -> T4 -> T5 -> T6 -> T7 -> T8 -> T9
+T1 → T2
+      ├→ T3 ─────┬→ T6 ─┐
+      └→ T4 → T5 ┘      ├→ T8
+           T3 + T5 → T7 ┘
 ```
 
-T2 与 T3 在完成 T1 后没有直接依赖；若未来并行实施，可以同时进行，但合并后必须先完成 T4 的联合验证再进入执行层集成。
+T3 与 T4 可在 T2 后分别推进；T5 依赖永久审批移除完成；T6 汇总执行入口行为，T7 更新文档，最终由 T8 全量验收。

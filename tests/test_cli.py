@@ -3,11 +3,13 @@ from __future__ import annotations
 from collections.abc import Iterator
 
 import pytest
+from prompt_toolkit.input import create_pipe_input
+from prompt_toolkit.output import DummyOutput
 
 from mycode import cli
 from mycode.agent.config import AgentRequest
 from mycode.agent.events import AgentEvent
-from mycode.permissions.approval import TerminalApprovalHandler
+from mycode.permissions.approval import TerminalApprovalHandler, select_approval_choice
 from mycode.permissions.models import ApprovalPrompt, PermissionConfigSet, PermissionLayer
 from mycode.types import AppConfig, ConfigError, ProviderError, TokenUsage, ToolResult
 
@@ -129,15 +131,41 @@ def test_cli_permission_mode_overrides_config(monkeypatch: pytest.MonkeyPatch) -
     assert captured == ["strict"]
 
 
-def test_terminal_approval_supports_all_choices_and_reprompts() -> None:
-    values = iter(["invalid", "s"])
+def test_terminal_approval_shows_context_and_uses_selector() -> None:
     output: list[str] = []
-    handler = TerminalApprovalHandler(input_func=lambda _: next(values), output_func=output.append)
+    handler = TerminalApprovalHandler(selector=lambda: "allow_session", output_func=output.append)
 
-    choice = handler.request(ApprovalPrompt("read_file", "a.txt", "test"))
+    choice = handler.request(ApprovalPrompt("run_command", "ls -la", "test"))
 
     assert choice == "allow_session"
-    assert any("无效选择" in line for line in output)
+    assert any("run_command" in line for line in output)
+    assert any("ls -la" in line for line in output)
+
+
+@pytest.mark.parametrize(
+    ("keys", "expected"),
+    [
+        ("\r", "deny"),
+        ("\x1b[B\r", "allow_once"),
+        ("\x1b[B\x1b[B\r", "allow_session"),
+        ("\x1b[A\r", "allow_session"),
+        ("p\x1b[B\r", "allow_once"),
+    ],
+)
+def test_approval_menu_uses_arrow_keys_and_enter(keys: str, expected: str) -> None:
+    with create_pipe_input() as pipe_input:
+        pipe_input.send_text(keys)
+        choice = select_approval_choice(input=pipe_input, output=DummyOutput(), require_tty=False)
+
+    assert choice == expected
+
+
+def test_terminal_approval_fails_closed_on_selector_error() -> None:
+    def fail() -> str:
+        raise EOFError
+
+    handler = TerminalApprovalHandler(selector=fail)
+    assert handler.request(ApprovalPrompt("run_command", "ls", "test")) == "deny"
 
 
 def test_cli_returns_nonzero_on_config_error(monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]) -> None:

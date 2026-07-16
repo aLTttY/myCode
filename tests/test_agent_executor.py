@@ -6,7 +6,8 @@ from pathlib import Path
 from mycode.agent.cancellation import CancellationToken
 from mycode.agent.executor import BatchToolExecutor
 from mycode.agent.tools import ToolBatch
-from mycode.permissions.models import PermissionDecision
+from mycode.permissions.models import PermissionConfigSet, PermissionDecision, PermissionLayer
+from mycode.permissions.service import PermissionService
 from mycode.tools.registry import ToolRegistry, create_default_registry
 from mycode.types import ToolCall, ToolContext, ToolResult, ToolSpec
 
@@ -18,6 +19,15 @@ def context(tmp_path: Path) -> ToolContext:
 class AllowPermissions:
     def authorize(self, call: ToolCall, context: ToolContext) -> PermissionDecision:
         return PermissionDecision(True, "test_allow", "allowed", call.name)
+
+
+class RecordingApproval:
+    def __init__(self) -> None:
+        self.calls = []
+
+    def request(self, approval):
+        self.calls.append(approval)
+        return "deny"
 
 
 def test_cancellation_token_is_idempotent() -> None:
@@ -45,6 +55,37 @@ def test_executor_runs_read_batch_and_returns_results(tmp_path: Path) -> None:
     assert sum(1 for event in events if getattr(event, "type", "") == "tool_call_started") == 2
     assert sum(1 for event in events if getattr(event, "type", "") == "tool_result") == 2
     assert sorted(item[0] for item in events if isinstance(item, tuple)) == ["1", "2"]
+
+
+def test_read_batch_does_not_request_approval(tmp_path: Path) -> None:
+    (tmp_path / "a.txt").write_text("a", encoding="utf-8")
+    (tmp_path / "b.txt").write_text("b", encoding="utf-8")
+    approval = RecordingApproval()
+    permissions = PermissionService(
+        PermissionConfigSet(
+            user=PermissionLayer("user"),
+            project=PermissionLayer("project"),
+            local=PermissionLayer("local"),
+            effective_mode="default",
+        ),
+        approval,
+    )
+    batch = ToolBatch(
+        safety="read",
+        calls=(
+            ToolCall(id="1", name="read_file", arguments={"path": "a.txt"}),
+            ToolCall(id="2", name="read_file", arguments={"path": "b.txt"}),
+        ),
+    )
+
+    events = list(
+        BatchToolExecutor(create_default_registry(), context(tmp_path), permissions).execute_batches(
+            [batch], CancellationToken()
+        )
+    )
+
+    assert approval.calls == []
+    assert all(item[1].ok for item in events if isinstance(item, tuple))
 
 
 class RecordingTool:

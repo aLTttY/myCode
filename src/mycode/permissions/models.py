@@ -9,7 +9,7 @@ PermissionMode = Literal["strict", "default", "allow"]
 RuleEffect = Literal["allow", "deny"]
 RuleSource = Literal["session", "local", "project", "user"]
 MatchType = Literal["exact", "glob"]
-ApprovalChoice = Literal["deny", "allow_once", "allow_session", "allow_permanent"]
+ApprovalChoice = Literal["deny", "allow_once", "allow_session"]
 
 
 @dataclass(frozen=True)

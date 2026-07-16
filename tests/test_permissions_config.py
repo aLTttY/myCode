@@ -35,6 +35,21 @@ def test_missing_files_are_empty_layers(tmp_path: Path) -> None:
     assert not loaded.user.rules and not loaded.project.rules and not loaded.local.rules
 
 
+def test_manually_written_local_rules_are_loaded(tmp_path: Path) -> None:
+    workspace = tmp_path / "workspace"
+    write(
+        workspace / ".mycode/permissions.local.yaml",
+        "allow:\n  - 'run_command(git status)'\ndeny:\n  - 'write_file(.env)'\n",
+    )
+
+    loaded = PermissionConfigLoader(TOOLS, tmp_path / "home").load(workspace)
+
+    assert [(rule.tool, rule.effect) for rule in loaded.local.rules] == [
+        ("run_command", "allow"),
+        ("write_file", "deny"),
+    ]
+
+
 @pytest.mark.parametrize(
     "content",
     [

@@ -32,6 +32,17 @@ def test_executor_runs_registered_tool(tmp_path: Path) -> None:
     assert result.ok is True
 
 
+def test_default_executor_runs_read_tool_without_approval(tmp_path: Path) -> None:
+    (tmp_path / "a.txt").write_text("hello", encoding="utf-8")
+
+    result = ToolExecutor(create_default_registry(), context(tmp_path)).execute(
+        ToolCall(id="1", name="read_file", arguments={"path": "a.txt"})
+    )
+
+    assert result.ok is True
+    assert result.data["content"] == "hello"
+
+
 def test_executor_wraps_unknown_tool(tmp_path: Path) -> None:
     result = ToolExecutor(create_default_registry(), context(tmp_path), AllowPermissions()).execute(
         ToolCall(id="1", name="missing", arguments={})

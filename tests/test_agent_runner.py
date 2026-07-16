@@ -68,9 +68,8 @@ def test_agent_runner_completed_after_multiple_iterations(tmp_path: Path) -> Non
 
 
 def test_permission_denial_is_fed_back_and_loop_continues(tmp_path: Path) -> None:
-    (tmp_path / "a.txt").write_text("hello", encoding="utf-8")
     provider = ScriptedProvider([
-        tool_call_events("1", "read_file", '{"path": "a.txt"}'),
+        tool_call_events("1", "run_command", '{"command": "echo hello"}'),
         [StreamEvent(type="text_delta", text="used another approach"), StreamEvent(type="message_done")],
     ])
     agent = AgentRunner(

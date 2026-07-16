@@ -1,13 +1,12 @@
 from __future__ import annotations
 
-from dataclasses import replace
 from threading import RLock
 
-from mycode.types import ConfigError, ToolCall, ToolContext
+from mycode.tools.safety import is_read_tool
+from mycode.types import ToolCall, ToolContext
 
 from .approval import ApprovalHandler, DenyApprovalHandler
 from .blacklist import is_blacklisted
-from .config import LocalRuleStore
 from .models import (
     ApprovalPrompt,
     PermissionConfigSet,
@@ -27,11 +26,9 @@ class PermissionService:
         self,
         config: PermissionConfigSet,
         approval_handler: ApprovalHandler | None = None,
-        local_store: LocalRuleStore | None = None,
     ) -> None:
         self.config = config
         self.approval_handler = approval_handler or DenyApprovalHandler()
-        self.local_store = local_store
         self._session_rules: list[PermissionRule] = []
         self._lock = RLock()
         self._resolver = PermissionTargetResolver()
@@ -58,6 +55,14 @@ class PermissionService:
             request = self._resolver.resolve(call, context.workspace_root)
         except PermissionValidationError as exc:
             return PermissionDecision(False, exc.reason_code, exc.message, exc.target)
+
+        if is_read_tool(call.name):
+            return PermissionDecision(
+                True,
+                "readonly_allow",
+                "专用只读工具已通过工作区校验并自动允许。",
+                request.target,
+            )
 
         if call.name == "run_command":
             command = request.target
@@ -117,12 +122,4 @@ class PermissionService:
                     self._session_rules.append(rule)
                 return PermissionDecision(True, "user_allow_session", "用户允许本会话内的相同调用。", request.target)
 
-            if choice == "allow_permanent" and self.local_store is not None:
-                try:
-                    local = self.local_store.add_exact_allow(request.tool, request.target)
-                except ConfigError as exc:
-                    return PermissionDecision(False, "persistence_failed", exc.user_message, request.target)
-                self.config = replace(self.config, local=local)
-                return PermissionDecision(True, "user_allow_permanent", "用户已永久允许相同调用。", request.target)
-
-            return PermissionDecision(False, "persistence_failed", "本地权限规则存储不可用，无法永久放行。", request.target)
+            return PermissionDecision(False, "invalid_approval", "审批结果无效，已安全拒绝。", request.target)

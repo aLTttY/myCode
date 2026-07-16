@@ -12,7 +12,7 @@ from .agent.config import AgentRequest
 from .agent.runner import AgentRunner
 from .config import load_config
 from .permissions.approval import TerminalApprovalHandler
-from .permissions.config import LocalRuleStore, PermissionConfigLoader
+from .permissions.config import PermissionConfigLoader
 from .permissions.service import PermissionService
 from .providers.factory import create_provider
 from .tools.registry import create_default_registry
@@ -63,11 +63,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         )
         permission_service = PermissionService(
             permission_config,
-            TerminalApprovalHandler(input_func=read_user_input),
-            LocalRuleStore(
-                workspace_root / ".mycode" / "permissions.local.yaml",
-                known_tools,
-            ),
+            TerminalApprovalHandler(),
         )
     except ConfigError as exc:
         print(f"配置错误：{exc.user_message}", file=sys.stderr)

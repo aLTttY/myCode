@@ -24,3 +24,6 @@ api_key: ${DEEPSEEK_API_KEY}
 #   项目级：<workspace>/.mycode/permissions.yaml
 #   本地级：<workspace>/.mycode/permissions.local.yaml
 # 也可以用 --permission-mode strict|default|allow 覆盖本次进程。
+# read_file、find_files、search_code 通过工作区校验后直接执行，不参与规则或审批。
+# default 模式对受控工具使用方向键菜单，仅支持不同意、仅本次同意、本会话同意。
+# 交互审批不会持久化；长期规则请手工写入 permissions.local.yaml。

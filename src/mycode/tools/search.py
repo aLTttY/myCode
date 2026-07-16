@@ -15,14 +15,22 @@ SKIP_DIRS = {".git", ".venv", "__pycache__", ".pytest_cache", ".mypy_cache", "no
 MAX_MATCHES = 100
 
 
-def _iter_files(root: Path) -> Iterable[Path]:
-    if root.is_file():
+def _inside_workspace(path: Path, workspace_root: Path) -> bool:
+    try:
+        path.resolve().relative_to(workspace_root.resolve())
+    except (OSError, RuntimeError, ValueError):
+        return False
+    return True
+
+
+def _iter_files(root: Path, workspace_root: Path) -> Iterable[Path]:
+    if root.is_file() and _inside_workspace(root, workspace_root):
         yield root
         return
     for path in root.rglob("*"):
         if any(part in SKIP_DIRS for part in path.relative_to(root).parts):
             continue
-        if path.is_file():
+        if path.is_file() and _inside_workspace(path, workspace_root):
             yield path
 
 
@@ -53,7 +61,7 @@ class FindFilesTool:
             pattern = require_str(arguments, "pattern")
             matches: list[str] = []
             root = context.workspace_root.resolve()
-            for path in _iter_files(root):
+            for path in _iter_files(root, root):
                 relative = path.relative_to(root).as_posix()
                 if fnmatch.fnmatch(relative, pattern) or fnmatch.fnmatch(path.name, pattern):
                     matches.append(relative)
@@ -111,7 +119,7 @@ class SearchCodeTool:
             return result_error(exc.message)
         matches: list[dict[str, object]] = []
         workspace_root = context.workspace_root.resolve()
-        for path in _iter_files(root):
+        for path in _iter_files(root, workspace_root):
             if _is_binary(path):
                 continue
             try:

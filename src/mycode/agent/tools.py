@@ -1,28 +1,16 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Literal
 
 from mycode.tools.registry import ToolRegistry
+from mycode.tools.safety import READ_TOOLS, ToolSafety, classify_tool
 from mycode.types import ToolCall
-
-
-ToolSafety = Literal["read", "side_effect"]
-
-READ_TOOLS = {"read_file", "find_files", "search_code"}
-SIDE_EFFECT_TOOLS = {"write_file", "edit_file", "run_command"}
 
 
 @dataclass(frozen=True)
 class ToolBatch:
     safety: ToolSafety
     calls: tuple[ToolCall, ...]
-
-
-def classify_tool(name: str) -> ToolSafety:
-    if name in READ_TOOLS:
-        return "read"
-    return "side_effect"
 
 
 def create_readonly_registry(full_registry: ToolRegistry) -> ToolRegistry:

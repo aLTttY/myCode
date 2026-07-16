@@ -68,7 +68,7 @@ def test_tool_failure_is_fed_back(tmp_path: Path) -> None:
     assert "文件不存在" in provider.calls[1].messages[-1].content
 
 
-def test_session_without_approval_handler_denies_unmatched_tool(tmp_path: Path) -> None:
+def test_session_without_approval_handler_allows_read_tool(tmp_path: Path) -> None:
     (tmp_path / "a.txt").write_text("hello", encoding="utf-8")
     provider = ScriptedProvider(
         [
@@ -82,7 +82,8 @@ def test_session_without_approval_handler_denies_unmatched_tool(tmp_path: Path) 
 
     list(session.send("read file"))
 
-    assert "user_denied" in provider.calls[1].messages[-1].content
+    assert '"ok": true' in provider.calls[1].messages[-1].content
+    assert "hello" in provider.calls[1].messages[-1].content
 
 
 def test_unknown_tool_is_fed_back(tmp_path: Path) -> None:

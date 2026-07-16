@@ -60,3 +60,36 @@ def test_search_code_rejects_outside_scope(tmp_path: Path) -> None:
     result = SearchCodeTool().run({"query": "agent", "path": "../outside"}, context(tmp_path))
     assert not result.ok
     assert "项目目录" in result.message
+
+
+def test_find_files_skips_symlink_to_outside_file(tmp_path: Path) -> None:
+    outside = tmp_path.parent / f"{tmp_path.name}-outside-find.txt"
+    outside.write_text("secret", encoding="utf-8")
+    (tmp_path / "linked.txt").symlink_to(outside)
+
+    result = FindFilesTool().run({"pattern": "*.txt"}, context(tmp_path))
+
+    assert result.ok
+    assert result.data["matches"] == []
+
+
+def test_search_code_skips_symlink_to_outside_file(tmp_path: Path) -> None:
+    outside = tmp_path.parent / f"{tmp_path.name}-outside-search.txt"
+    outside.write_text("outside-secret", encoding="utf-8")
+    (tmp_path / "linked.txt").symlink_to(outside)
+
+    result = SearchCodeTool().run({"query": "outside-secret"}, context(tmp_path))
+
+    assert result.ok
+    assert result.data["matches"] == []
+
+
+def test_search_code_allows_symlink_to_internal_file(tmp_path: Path) -> None:
+    target = tmp_path / "target.txt"
+    target.write_text("inside-value", encoding="utf-8")
+    (tmp_path / "linked.txt").symlink_to(target)
+
+    result = SearchCodeTool().run({"query": "inside-value", "path": "linked.txt"}, context(tmp_path))
+
+    assert result.ok
+    assert result.data["matches"][0]["path"] == "target.txt"
