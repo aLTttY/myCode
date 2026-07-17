@@ -1,91 +1,106 @@
-# Mycode 只读自动执行与方向键审批 Checklist
+# MewCode MCP 客户端 Checklist
 
-> 每项必须通过自动化测试、静态检查或可观察的 CLI 行为验证。灾难性命令只允许传给权限判定器，禁止交给 shell 实际执行。
+> 每一项都必须通过运行测试、命令或观察进程行为验证。验收时记录实际结果和证据；不得仅凭代码审阅勾选。
 
-## 专用只读工具
+## 运行时与依赖
 
-- [ ] AC1：`read_file`、`find_files`、`search_code` 在 strict、default、allow 三种模式下均返回 `readonly_allow`，且审批器调用次数为零。（验证：运行 `PYTHONPATH=src .venv/bin/python -m pytest tests/test_permissions_service.py`）
-- [ ] AC2：只读工具命中历史 deny 规则、没有审批器或处于 strict 模式时仍直接执行。（验证：运行 `PYTHONPATH=src .venv/bin/python -m pytest tests/test_permissions_service.py tests/test_session_tools.py`）
-- [ ] AC3：只读工具的无效参数、绝对路径、`..`、项目外符号链接仍被拒绝或跳过，且项目外内容未被读取。（验证：运行 `PYTHONPATH=src .venv/bin/python -m pytest tests/test_permissions_sandbox.py tests/test_tools_files.py tests/test_tools_search.py`）
-- [ ] AC4：`run_command("ls -la")` 不进入只读快速路径；default 模式无规则时调用审批器。（验证：运行 `PYTHONPATH=src .venv/bin/python -m pytest tests/test_permissions_service.py tests/test_agent_tools.py`）
-- [ ] AC5：`write_file`、`edit_file`、`run_command` 被拒绝时工具实现调用次数为零。（验证：运行 `PYTHONPATH=src .venv/bin/python -m pytest tests/test_tool_executor.py tests/test_session_tools.py`）
+- [ ] Python 最低版本声明为 3.10，当前验收解释器不低于 3.10，官方 MCP SDK 已安装且版本满足 `>=1.27,<2`。（验证：运行 `.venv/bin/python -c "import sys; from importlib.metadata import version; print(sys.version_info[:3], version('mcp'))"`，并检查 `pyproject.toml`）
+- [ ] MCP SDK v2 预发布或稳定版不会被依赖解析选中。（验证：运行 `.venv/bin/python -m pip show mcp`，版本主版本必须为 1；检查依赖上界 `<2`）
+- [ ] 没有 MCP Server 配置时不会创建后台 event loop 线程，六个内置工具和现有 CLI 行为保持可用。（验证：运行 `PYTHONPATH=src .venv/bin/python -m pytest tests/test_mcp_manager.py tests/test_cli.py tests/test_tools_registry.py`）
 
-## 不可绕过安全层
+## 配置与合并
 
-- [ ] AC6：根目录或用户目录破坏、磁盘覆写或格式化、系统目录递归权限修改、关机重启和 fork bomb 样例全部被判定器硬拒绝，测试不调用 shell。（验证：运行 `PYTHONPATH=src .venv/bin/python -m pytest tests/test_permissions_blacklist.py`）
-- [ ] AC7：strict、default、allow、各层 allow 规则和人工同意均不能覆盖黑名单。（验证：运行 `PYTHONPATH=src .venv/bin/python -m pytest tests/test_permissions_blacklist.py tests/test_permissions_service.py`）
-- [ ] AC8：项目内普通删除、包安装、管道和 Git 强制操作等潜在开发命令不被硬黑名单误拦，继续进入规则、模式或审批层。（验证：运行 `PYTHONPATH=src .venv/bin/python -m pytest tests/test_permissions_blacklist.py tests/test_permissions_service.py`）
-- [ ] AC9：写入和编辑工具拒绝绝对路径、`..` 和项目外符号链接，目标内容不发生变化。（验证：运行 `PYTHONPATH=src .venv/bin/python -m pytest tests/test_permissions_sandbox.py tests/test_tools_files.py`）
-- [ ] AC10：命令中可识别的项目外显式路径、无法规范化路径和项目外符号链接被拒绝，结果给出项目内路径或专用工具建议。（验证：运行 `PYTHONPATH=src .venv/bin/python -m pytest tests/test_permissions_sandbox.py tests/test_tools_command.py`）
+- [ ] AC1：用户级和项目级不同 Server 同时保留；项目级同名 Server 整体覆盖用户级，不做字段级拼接；`--config` 指定文件作为项目级来源。（验证：运行 `PYTHONPATH=src .venv/bin/python -m pytest tests/test_config.py tests/test_cli.py`，检查两层、同名覆盖及自定义路径用例）
+- [ ] AC2：合法 stdio/HTTP 配置可加载；缺少 `transport`、缺少必填字段、字段类型错误、未知字段、传输字段混用、保留 HTTP header 或非法 URL 时，启动前产生带 Server/字段上下文的 ConfigError。（验证：运行 `PYTHONPATH=src .venv/bin/python -m pytest tests/test_config.py`）
+- [ ] AC3：`${VAR}` 独占值、嵌入字符串和同一字符串多个变量均正确展开；未设置变量报错，已设置为空合法；错误输出不含测试 secret。（验证：运行 `PYTHONPATH=src .venv/bin/python -m pytest tests/test_config.py`，并检查 capsys 中 secret sentinel 不存在）
+- [ ] 用户配置文件缺失按空 MCP 层处理，项目配置缺失或 Provider 必填字段缺失仍保持现有配置错误语义。（验证：运行 `PYTHONPATH=src .venv/bin/python -m pytest tests/test_config.py tests/test_cli.py`）
+- [ ] 两层 YAML 的重复 key 均被拒绝，Server map 和 Server 内部重复字段不会静默采用后值。（验证：运行 `PYTHONPATH=src .venv/bin/python -m pytest tests/test_config.py`）
+- [ ] Server 配置名只接受集中式合法工具名字符并能参与最终 64 字符限制；非法 Server 名在建立任何连接前终止启动。（验证：运行 `PYTHONPATH=src .venv/bin/python -m pytest tests/test_config.py tests/test_tools_registry.py tests/test_cli.py`）
 
-## 规则与权限模式
+## 传输、初始化与发现
 
-- [ ] AC11：受控工具的精确规则只匹配完整目标；glob 规则只匹配预期目标。（验证：运行 `PYTHONPATH=src .venv/bin/python -m pytest tests/test_permissions_rules.py`）
-- [ ] AC12：`run_command(git *)` 匹配完整命令；写入和编辑规则匹配规范化相对路径，内容变化不影响规则目标。（验证：运行 `PYTHONPATH=src .venv/bin/python -m pytest tests/test_permissions_rules.py tests/test_permissions_service.py`）
-- [ ] AC13：会话、本地、项目、用户规则冲突时严格使用“会话 > 本地 > 项目 > 用户”。（验证：运行 `PYTHONPATH=src .venv/bin/python -m pytest tests/test_permissions_rules.py tests/test_permissions_config.py`）
-- [ ] AC14：同层精确规则优先于 glob；相同匹配类型下 deny 优先于 allow。（验证：运行 `PYTHONPATH=src .venv/bin/python -m pytest tests/test_permissions_rules.py`）
-- [ ] AC15：受控工具规则未命中时，strict 拒绝、default 审批、allow 放行。（验证：运行 `PYTHONPATH=src .venv/bin/python -m pytest tests/test_permissions_service.py`）
-- [ ] AC16：受控工具命中显式 deny 后不调用审批器，也不受 allow 模式影响。（验证：运行 `PYTHONPATH=src .venv/bin/python -m pytest tests/test_permissions_service.py`）
+- [ ] AC4：真实 stdio Server 通过 stdin/stdout 完成 initialize、initialized 和工具发现；子进程可读取父进程环境，配置 env 覆盖同名值。（验证：运行 `PYTHONPATH=src .venv/bin/python -m pytest tests/test_mcp_integration.py -v`，检查 stdio 环境用例）
+- [ ] AC5：真实 Streamable HTTP Server 能以普通 JSON 和 SSE 响应完成会话；静态 URL/header 展开值到达 Server，协议 header 与 Session ID 由 SDK 管理，日志和错误不泄露 header secret。（验证：运行 `PYTHONPATH=src .venv/bin/python -m pytest tests/test_mcp_integration.py -v`，检查 HTTP JSON、SSE、header 与脱敏用例）
+- [ ] AC6：两种传输都严格先 initialize 再 tools/list；连接、初始化或工具发现任一步失败的 Server 不注册任何工具，其他 Server 继续。（验证：运行 `PYTHONPATH=src .venv/bin/python -m pytest tests/test_mcp_manager.py tests/test_mcp_integration.py`）
+- [ ] AC7：同一 Server 多个并发请求以不同顺序返回时仍按 JSON-RPC id 得到各自结果；通知、未知 id、重复响应不会误配或完成错误 future。（验证：运行 `PYTHONPATH=src .venv/bin/python -m pytest tests/test_mcp_manager.py tests/test_mcp_integration.py`，检查乱序与异常消息用例）
+- [ ] tools/list 的所有 cursor 页均被读取；重复 cursor 会结束发现并产生该 Server 的协议警告，不会无限循环。（验证：运行 `PYTHONPATH=src .venv/bin/python -m pytest tests/test_mcp_manager.py`）
+- [ ] Server 未声明 tools capability、协商到不受 SDK 支持的版本或返回无效 schema 时，只关闭该 Server 并产生对应阶段警告。（验证：运行 `PYTHONPATH=src .venv/bin/python -m pytest tests/test_mcp_manager.py`）
+- [ ] 启动后收到 `notifications/tools/list_changed` 不会热更新 Registry，工具集合保持启动快照。（验证：运行 `PYTHONPATH=src .venv/bin/python -m pytest tests/test_mcp_manager.py tests/test_tools_registry.py`）
 
-## 三选项交互审批
+## 工具命名与注册
 
-- [ ] AC17：审批界面显示工具名、脱敏目标和原因，并且只出现“不同意、仅本次同意、本会话同意”。（验证：运行 `PYTHONPATH=src .venv/bin/python -m pytest tests/test_cli.py`，并检查渲染文本）
-- [ ] AC18：选择“仅本次同意”只允许当前调用，下一次相同调用重新审批。（验证：运行 `PYTHONPATH=src .venv/bin/python -m pytest tests/test_permissions_service.py`）
-- [ ] AC19：选择“本会话同意”后当前服务实例直接命中；重建服务后规则消失。（验证：运行 `PYTHONPATH=src .venv/bin/python -m pytest tests/test_permissions_service.py`）
-- [ ] AC20：虚拟终端发送上、下方向键可以循环移动高亮，回车提交当前项；发送 `d/o/s/p` 不提交审批。（验证：运行 `PYTHONPATH=src .venv/bin/python -m pytest tests/test_cli.py`）
-- [ ] AC21：完成拒绝、仅本次或本会话审批前后，用户、项目、本地权限文件内容均不变化。（验证：运行 `PYTHONPATH=src .venv/bin/python -m pytest tests/test_cli.py tests/test_permissions_service.py`）
-- [ ] AC22：用户手工写入 `.mycode/permissions.local.yaml` 后，重建权限服务能加载 allow/deny 并作用于受控工具。（验证：运行 `PYTHONPATH=src .venv/bin/python -m pytest tests/test_permissions_config.py tests/test_permissions_service.py`）
-- [ ] AC23：直接回车默认拒绝；Ctrl+C、Ctrl+D、EOF、非 TTY、菜单异常和无审批接口均安全拒绝，但合法只读工具仍自动执行。（验证：运行 `PYTHONPATH=src .venv/bin/python -m pytest tests/test_cli.py tests/test_permissions_service.py tests/test_session_tools.py`）
-- [ ] 审批类型、服务分支和测试中不存在 `allow_permanent` 或 `user_allow_permanent`。（验证：运行 `rg -n "allow_permanent|user_allow_permanent" src tests`，期望无匹配；菜单标签由 `tests/test_cli.py` 证明没有永久选项）
-- [ ] CLI 不再构造或向权限服务传入 `LocalRuleStore`，审批路径没有磁盘写入调用。（验证：运行 `rg -n "LocalRuleStore|add_exact_allow" src/mycode/cli.py src/mycode/permissions/service.py src/mycode/permissions/approval.py`，期望无匹配）
+- [ ] AC8：合法远端工具以 `<server>__<tool>` 出现在 Agent 工具列表，description 和 inputSchema 与发现结果一致，并使用远端原名完成调用。（验证：运行 `PYTHONPATH=src .venv/bin/python -m pytest tests/test_mcp_tool.py tests/test_agent_runner.py tests/test_mcp_integration.py`）
+- [ ] AC9：非法远端名、非法组合名或超过 64 字符的最终名不会被清洗或改写；只跳过该工具并输出含 Server/原因的 warning，同 Server 其他合法工具仍注册。（验证：运行 `PYTHONPATH=src .venv/bin/python -m pytest tests/test_mcp_manager.py tests/test_cli.py tests/test_tools_registry.py`）
+- [ ] AC10：与内置工具、先注册 MCP 工具或同一 Server 重复工具冲突时，先注册项对象和 spec 保持不变；冲突项跳过并警告，后续合法工具仍注册。（验证：运行 `PYTHONPATH=src .venv/bin/python -m pytest tests/test_tools_registry.py tests/test_mcp_manager.py tests/test_cli.py`）
+- [ ] MCP SDK/Pydantic 类型不会进入 ToolSpec、Provider 请求或 ToolResult；边界外只出现项目内 dataclass、dict/list/scalar。（验证：运行 `PYTHONPATH=src .venv/bin/python -m pytest tests/test_mcp_tool.py tests/test_providers.py`）
 
-## Agent Loop、并发与配置
+## 调用、结果与上下文边界
 
-- [ ] AC24：黑名单、沙箱、规则 deny 和用户拒绝形成带稳定原因码的 `ToolResult(ok=False)` 并写入消息历史。（验证：运行 `PYTHONPATH=src .venv/bin/python -m pytest tests/test_tool_executor.py tests/test_agent_runner.py tests/test_session_tools.py`）
-- [ ] AC25：第一轮受控工具被拒绝后，Agent 进入下一轮，可改用安全工具并最终完成；持续请求也受最大迭代限制。（验证：运行 `PYTHONPATH=src .venv/bin/python -m pytest tests/test_agent_runner.py`）
-- [ ] AC26：多个副作用工具串行；多个专用只读工具并发且不会产生审批提示。（验证：运行 `PYTHONPATH=src .venv/bin/python -m pytest tests/test_agent_executor.py tests/test_permissions_service.py`）
-- [ ] AC27：用户、项目、本地 YAML 均能加载；缺失配置不影响启动；历史只读规则不阻止只读工具。（验证：运行 `PYTHONPATH=src .venv/bin/python -m pytest tests/test_permissions_config.py tests/test_cli.py tests/test_permissions_service.py`）
-- [ ] AC28：重复键、未知字段、YAML 错误、无效模式、无效规则和未知工具产生可理解错误，受控调用不降级放行。（验证：运行 `PYTHONPATH=src .venv/bin/python -m pytest tests/test_permissions_config.py tests/test_cli.py`）
-- [ ] AC29：普通聊天、Plan Mode、Do Mode、工具流式回灌、取消、未知工具阈值和最大迭代路径通过回归。（验证：运行 `PYTHONPATH=src .venv/bin/python -m pytest tests/test_session.py tests/test_tool_streaming.py tests/test_agent_runner.py tests/test_agent_tools.py tests/test_cli.py`）
-- [ ] AC30：只读自动执行、路径边界、硬黑名单、规则模式、两种交互放行、无永久同意、方向键菜单、无交互拒绝和拒绝后继续循环均有自动化测试。（验证：运行全部定向测试及完整测试套件）
+- [ ] AC11：同一 Server 连续发现和多次调用复用一个 transport、ClientSession 和 MCP session；stdio 不重复启动子进程，HTTP 不重复 initialize。（验证：运行 `PYTHONPATH=src .venv/bin/python -m pytest tests/test_mcp_manager.py tests/test_mcp_integration.py`，检查 Server 侧会话计数）
+- [ ] AC12：单/多文本块顺序正确，正常大小 `structuredContent` 保持 JSON 语义；`isError: true` 产生 `ok=False`，成功与失败均写回 Agent 消息历史。（验证：运行 `PYTHONPATH=src .venv/bin/python -m pytest tests/test_mcp_tool.py tests/test_agent_runner.py tests/test_mcp_integration.py`）
+- [ ] AC13：image、audio、embedded resource、resource link 及混合结果均产生带不支持类型名的结构化失败；不会保存或回灌 base64、资源正文或 URI 内容。（验证：运行 `PYTHONPATH=src .venv/bin/python -m pytest tests/test_mcp_tool.py tests/test_mcp_integration.py`）
+- [ ] AC20：超大文本按 max_output_chars 截断并标记；超大 structuredContent 以 `result_too_large` 失败且不产生残缺 JSON；Agent 上下文没有无界内容。（验证：运行 `PYTHONPATH=src .venv/bin/python -m pytest tests/test_mcp_tool.py tests/test_agent_runner.py tests/test_mcp_integration.py`）
+- [ ] JSON-RPC error、连接错误、初始化错误、发现错误、超时、session terminated 和 manager closed 具有可区分的稳定原因码与 Server 上下文。（验证：运行 `PYTHONPATH=src .venv/bin/python -m pytest tests/test_mcp_manager.py tests/test_mcp_tool.py`）
+- [ ] warning、异常、ToolResult 和 CLI 输出不包含 HTTP header 值、stdio env 值、Session ID 或测试 secret sentinel。（验证：运行 `PYTHONPATH=src .venv/bin/python -m pytest tests/test_config.py tests/test_mcp_manager.py tests/test_mcp_tool.py tests/test_cli.py tests/test_mcp_integration.py`，并检查脱敏断言）
 
-## 架构与文档一致性
+## 权限与 Agent 集成
 
-- [ ] 只读工具集合只在共享安全分类模块定义；Agent 和权限服务均复用它。（验证：运行 `rg -n "READ_TOOLS" src/mycode` 并检查不存在重复集合字面量）
-- [ ] 所有工具入口共享 `ToolExecutor` 和 `PermissionService`；只读快速路径没有绕过目标校验。（验证：检查调用关系，并运行 `tests/test_tool_executor.py`、`tests/test_session_tools.py`）
-- [ ] `run_command`、未知工具、写入和编辑始终分类为有副作用。（验证：运行 `PYTHONPATH=src .venv/bin/python -m pytest tests/test_agent_tools.py`）
-- [ ] 本地权限文件仍被 Git 忽略，项目共享权限文件不被忽略。（验证：运行 `git check-ignore .mycode/permissions.local.yaml` 应成功；运行 `git check-ignore .mycode/permissions.yaml` 应不匹配）
-- [ ] README 和配置示例记录三个自动执行工具、工作区边界、三选项方向键菜单、无永久同意、手工本地规则和命令隐式访问限制。（验证：运行 `rg -n "read_file|find_files|search_code|方向键|permissions.local.yaml|隐式文件访问" README.md config.example.yaml` 并人工核对）
-- [ ] 文档不再宣称所有只读调用需要权限审批，也不包含旧 `[d]/[o]/[s]/[p]` 菜单。（验证：运行 `rg -n "只读工具仍经过权限|\[d\]|\[o\]|\[s\]|\[p\]" README.md config.example.yaml`，期望无匹配）
+- [ ] AC14：所有 MCP 工具均分类为 side_effect，进入现有权限判定并串行执行；`readOnlyHint` 不会进入只读免审批或并发路径。（验证：运行 `PYTHONPATH=src .venv/bin/python -m pytest tests/test_agent_tools.py tests/test_agent_executor.py tests/test_permissions_service.py`）
+- [ ] MCP 权限目标稳定为 `call`；default 模式请求审批，strict 拒绝，allow 放行，显式 allow/deny 和会话规则继续遵守现有优先级。（验证：运行 `PYTHONPATH=src .venv/bin/python -m pytest tests/test_permissions_rules.py tests/test_permissions_service.py tests/test_mcp_tool.py`）
+- [ ] `server__tool(call)` 可用于已配置但暂时离线的 Server，权限配置不会因此阻止 CLI 启动；非配置前缀的未知工具仍产生 unknown_tool。（验证：运行 `PYTHONPATH=src .venv/bin/python -m pytest tests/test_permissions_config.py tests/test_permissions_service.py tests/test_cli.py`）
+- [ ] ToolExecutor 在权限拒绝 MCP 工具时不调用 manager；批准后才发起远端请求。（验证：运行 `PYTHONPATH=src .venv/bin/python -m pytest tests/test_mcp_tool.py tests/test_tool_executor.py`，检查 manager 调用计数）
+- [ ] MCP 成功、远端失败、权限拒绝和连接失效都作为结构化 ToolResult 回灌 Agent Loop，模型可以进入下一轮而不是因适配器异常终止。（验证：运行 `PYTHONPATH=src .venv/bin/python -m pytest tests/test_agent_runner.py tests/test_mcp_integration.py`）
 
-## 编译与测试
+## 生命周期、隔离与超时
+
+- [ ] AC15：正常退出、exit/quit/退出、EOF、等待输入 Ctrl+C、Agent 执行 Ctrl+C、ProviderError 和启动后异常都只调用一次 manager.close；HTTP client/session、stdio 管道/子进程、在途请求、event loop 和后台线程均结束。（验证：运行 `PYTHONPATH=src .venv/bin/python -m pytest tests/test_cli.py tests/test_mcp_manager.py tests/test_mcp_integration.py`）
+- [ ] AC16：一个 Server 的 connect、initialize、list_tools 或 call 失败不影响其他 Server 和六个内置工具；全部 Server 失败时 CLI 仍启动并为每个失败项输出 warning。（验证：运行 `PYTHONPATH=src .venv/bin/python -m pytest tests/test_mcp_manager.py tests/test_cli.py tests/test_mcp_integration.py`）
+- [ ] AC17：stdio 退出、HTTP session terminated 或连接失效后，后续调用返回结构化失败；应用层没有重新启动子进程、重建 ClientSession 或再次 initialize。（验证：运行 `PYTHONPATH=src .venv/bin/python -m pytest tests/test_mcp_manager.py tests/test_mcp_integration.py`，检查 Server 初始化计数保持不变）
+- [ ] 同一 Streamable HTTP 请求/会话内的 SDK SSE resumption 可以完成原请求，但不会被实现误写成新 MCP 会话重连。（验证：运行 `PYTHONPATH=src .venv/bin/python -m pytest tests/test_mcp_manager.py tests/test_mcp_integration.py`）
+- [ ] AC18：无响应 Server 的启动、发现、调用和关闭均在测试超时边界内结束；超时 future 被取消，随后无后台迟到结果或未完成 task。（验证：运行 `PYTHONPATH=src .venv/bin/python -m pytest tests/test_mcp_manager.py tests/test_mcp_integration.py`，检查 elapsed 上限与资源计数）
+- [ ] 一个 Server 的异常、关闭或请求取消不会取消、完成或污染另一 Server 的请求。（验证：运行 `PYTHONPATH=src .venv/bin/python -m pytest tests/test_mcp_manager.py tests/test_mcp_integration.py`，检查跨 Server 隔离用例）
+- [ ] manager.start、discover、call_tool 和 close 的非法状态有确定行为；close 幂等，close 后拒绝新调用且不重新创建 event loop。（验证：运行 `PYTHONPATH=src .venv/bin/python -m pytest tests/test_mcp_manager.py`）
+
+## 既有能力回归
+
+- [ ] AC19：六个内置工具的名称、描述、schema、执行路径和重复保护保持不变。（验证：运行 `PYTHONPATH=src .venv/bin/python -m pytest tests/test_tools_registry.py tests/test_tool_descriptions.py tests/test_tools_files.py tests/test_tools_command.py tests/test_tools_search.py`）
+- [ ] 现有权限黑名单、路径沙箱、规则优先级、三档模式和审批菜单不因动态 MCP 命名空间改变。（验证：运行 `PYTHONPATH=src .venv/bin/python -m pytest tests/test_permissions_blacklist.py tests/test_permissions_sandbox.py tests/test_permissions_rules.py tests/test_permissions_config.py tests/test_permissions_service.py tests/test_cli.py`）
+- [ ] 普通聊天、Plan Mode、Do Mode、Provider 工具格式、工具流式回灌、取消、未知工具阈值和最大迭代行为保持可用。（验证：运行 `PYTHONPATH=src .venv/bin/python -m pytest tests/test_session.py tests/test_session_tools.py tests/test_providers.py tests/test_tool_streaming.py tests/test_agent_runner.py tests/test_cli.py`）
+
+## 文档与范围
+
+- [ ] README 和配置示例说明 Python 3.10、两层 merge、两种 transport、`${VAR}`、stdio 环境继承、HTTP headers、`<server>__<tool>`、`server__tool(call)`、失败隔离和关闭语义。（验证：运行 `rg -n "Python 3.10|mcp_servers|transport: stdio|transport: http|Streamable HTTP|server>__<tool|__.*call|失败|关闭" README.md config.example.yaml` 并人工核对）
+- [ ] 文档明确说明仅支持 text/structuredContent，不做 Resources、Prompts、Sampling、健康检查、自动重连或运行时动态重载。（验证：运行 `rg -n "structuredContent|Resources|Prompts|Sampling|健康检查|自动重连|动态重载" README.md config.example.yaml`）
+- [ ] 源码没有实现资源/提示词/采样发现、Server 健康检查、应用层重连或动态工具重载入口。（验证：运行 `rg -n "list_resources|read_resource|list_prompts|get_prompt|sampling|health.?check|reconnect|reload.*tool" src/mycode/mcp src/mycode/cli.py`，人工确认匹配仅可能是明确拒绝/说明而非实现）
+- [ ] `config.example.yaml` 只使用占位环境变量，没有真实 token、Authorization 值或可用私有地址。（验证：人工检查示例，并运行 `rg -n "Bearer [A-Za-z0-9]|api[_-]?key:\s+[^$]|token:\s+[^$]" config.example.yaml`，期望无真实值）
+
+## 编译、测试与代码质量
 
 - [ ] Python 源码编译无语法或导入错误。（验证：运行 `PYTHONPYCACHEPREFIX=/tmp/mycode-pycache PYTHONPATH=src .venv/bin/python -m compileall -q src`）
-- [ ] 权限和审批定向测试全部通过。（验证：运行 `PYTHONPATH=src .venv/bin/python -m pytest tests/test_permissions_blacklist.py tests/test_permissions_sandbox.py tests/test_permissions_rules.py tests/test_permissions_config.py tests/test_permissions_service.py tests/test_cli.py`）
-- [ ] 工具和 Agent 集成测试全部通过。（验证：运行 `PYTHONPATH=src .venv/bin/python -m pytest tests/test_tools_files.py tests/test_tools_search.py tests/test_tool_executor.py tests/test_agent_tools.py tests/test_agent_executor.py tests/test_session_tools.py tests/test_agent_runner.py`）
-- [ ] 完整项目测试全部通过。（验证：运行 `PYTHONPATH=src .venv/bin/python -m pytest`）
-- [ ] 补丁无空白错误，实现和用户文档中无新增未完成占位符。（验证：运行 `git diff --check`，再运行 `rg -n "TO""DO|TB""D" src tests README.md config.example.yaml`）
+- [ ] MCP 配置、manager、Tool 和真实传输测试全部通过。（验证：运行 `PYTHONPATH=src .venv/bin/python -m pytest tests/test_config.py tests/test_mcp_manager.py tests/test_mcp_tool.py tests/test_mcp_integration.py`）
+- [ ] Registry、权限、工具执行、Agent 与 CLI 集成测试全部通过。（验证：运行 `PYTHONPATH=src .venv/bin/python -m pytest tests/test_tools_registry.py tests/test_permissions_config.py tests/test_permissions_rules.py tests/test_permissions_service.py tests/test_agent_tools.py tests/test_agent_executor.py tests/test_tool_executor.py tests/test_agent_runner.py tests/test_cli.py`）
+- [ ] 完整项目测试套件全部通过。（验证：运行 `PYTHONPATH=src .venv/bin/python -m pytest`）
+- [ ] 项目未配置独立 lint 时，以 compileall、完整 pytest 和 diff 检查作为静态质量门禁；若实施期间新增 lint 配置，则对应检查也必须通过。（验证：检查 `pyproject.toml`，运行配置中声明的 lint 命令，如无则记录“不适用”）
+- [ ] 补丁无空白错误、调试打印或未完成占位符。（验证：运行 `git diff --check`，再运行 `rg -n "TO""DO|TB""D|breakpoint\(|pdb\.set_trace" src tests README.md config.example.yaml`）
+- [ ] 变更范围没有覆盖或删除用户现有权限改动；根目录四份文档已按用户授权替换为本 MCP 功能版本。（验证：比较 T0 基线与最终 `git status --short`、`git diff --stat` 和重叠文件逐项 diff）
 
 ## 端到端场景
 
-- [ ] 场景 1：default/strict 模式下 Agent 调用 `read_file` → 不显示审批 → 返回真实内容 → Agent 正常答复。（验证：运行 `PYTHONPATH=src .venv/bin/python -m pytest tests/test_agent_runner.py tests/test_session_tools.py`）
-- [ ] 场景 2：Agent 调用 `run_command("ls -la")` → 显示三选项菜单 → 下键选择“仅本次同意”并回车 → 命令执行 → 相同命令下次再次审批。（验证：使用虚拟终端集成测试运行 `tests/test_cli.py tests/test_permissions_service.py`）
-- [ ] 场景 3：Agent 调用未匹配的写入工具 → 下键两次选择“本会话同意” → 当前会话相同目标不再审批 → 重启后重新审批，所有权限 YAML 均未变化。（验证：运行 `PYTHONPATH=src .venv/bin/python -m pytest tests/test_cli.py tests/test_permissions_service.py` 并比较临时配置文件内容）
-- [ ] 场景 4：用户手工写入本地 allow 规则 → 重启 Mycode → 受控目标无需审批；手工 deny 目标保持拒绝。（验证：运行 `PYTHONPATH=src .venv/bin/python -m pytest tests/test_permissions_config.py tests/test_permissions_service.py`）
-- [ ] 场景 5：allow 模式或高优先级 allow 尝试放行 `rm -rf /` 或项目外路径 → 硬安全层拒绝 → 工具实现不执行 → Agent 得到清晰结果并收尾。（验证：运行 `PYTHONPATH=src .venv/bin/python -m pytest tests/test_permissions_blacklist.py tests/test_permissions_sandbox.py tests/test_permissions_service.py tests/test_tool_executor.py tests/test_agent_runner.py`）
+- [ ] AC21 / 场景 1：配置一个真实 stdio Server、一个真实 Streamable HTTP Server 和一个故障 Server → MewCode 并发启动发现 → 两个可用 Server 的 `<server>__<tool>` 注册 → 故障 Server 只警告 → 两种工具分别通过权限判定 → text 与 structuredContent 回灌 Agent → CLI 退出后无连接、线程或子进程残留。（验证：运行 `PYTHONPATH=src .venv/bin/python -m pytest tests/test_mcp_integration.py -v` 对应混合场景，并记录进程/资源断言）
+- [ ] 场景 2：用户级声明 stdio Server，项目级以同名 HTTP Server 整体覆盖并新增另一个 Server → 仅项目级同名定义生效 → `${VAR}` header 展开 → 两个项目有效工具可调用。（验证：运行 `PYTHONPATH=src .venv/bin/python -m pytest tests/test_config.py tests/test_mcp_integration.py -v` 对应覆盖场景）
+- [ ] 场景 3：default 模式调用 `server__tool` → 审批目标显示 `call` 且不显示敏感 arguments → 选择本会话同意 → 后续不同参数调用不再审批 → 重启后重新审批。（验证：运行 `PYTHONPATH=src .venv/bin/python -m pytest tests/test_permissions_service.py tests/test_mcp_tool.py tests/test_cli.py` 对应会话审批场景）
+- [ ] 场景 4：活动 stdio/HTTP 会话在首次成功调用后失效 → 后续调用返回带 Server 和稳定原因码的 ToolResult → Agent 收到失败并继续 → Server 初始化计数不增加，证明没有自动重连。（验证：运行 `PYTHONPATH=src .venv/bin/python -m pytest tests/test_mcp_integration.py -v` 对应 session loss 场景）
+- [ ] 场景 5：远端同时返回 text 与不支持的 image/audio/resource block → 结果整体失败 → 二进制或资源内容未进入 ToolResult、日志和 Agent history。（验证：运行 `PYTHONPATH=src .venv/bin/python -m pytest tests/test_mcp_tool.py tests/test_mcp_integration.py` 对应混合内容场景）
 
-## 范围核对
+## 验收覆盖索引
 
-- [ ] 未实现 shell 只读命令识别；`run_command` 始终受控。（验证：检查共享安全分类和权限服务测试）
-- [ ] 未新增网络限制、资源配额、审计日志、GUI 或容器化。（验证：检查 `git diff --stat` 和新增依赖）
-- [ ] 未宣称命令工具具有完整 OS 文件隔离；文档仍只承诺检查可识别显式路径。（验证：检查 README 与 `src/mycode/permissions/sandbox.py`）
-
-## 本次验收记录
-
-- [x] Python 编译通过。证据：使用 `/tmp/mycode-pycache` 运行 `compileall`，退出码为 0。
-- [x] 完整测试通过。证据：基础改造为 `203 passed`；补充会话选择日志与循环导入回归后为 `205 passed`。
-- [x] 补丁格式通过。证据：`git diff --check` 无输出。
-- [x] 永久审批已移除。证据：在 `src`、`tests` 中搜索 `allow_permanent|user_allow_permanent` 无匹配。
-- [x] 审批持久化接线已移除。证据：在 CLI、权限服务和审批模块中搜索 `LocalRuleStore|add_exact_allow` 无匹配。
-- [x] 旧字母菜单已移除。证据：README 和配置示例中搜索 `[d]/[o]/[s]/[p]` 无匹配。
-- [x] 手工本地规则保留。证据：配置加载测试通过，`.mycode/permissions.local.yaml` 仍由 Git 忽略。
+| Spec 验收标准 | Checklist 位置 |
+|---------------|----------------|
+| AC1-AC3 | 配置与合并 |
+| AC4-AC7 | 传输、初始化与发现 |
+| AC8-AC10 | 工具命名与注册 |
+| AC11-AC13、AC20 | 调用、结果与上下文边界 |
+| AC14 | 权限与 Agent 集成 |
+| AC15-AC18 | 生命周期、隔离与超时 |
+| AC19 | 既有能力回归 |
+| AC21 | 端到端场景 1 |

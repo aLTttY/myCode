@@ -85,3 +85,30 @@ def test_local_store_appends_exact_allow_without_touching_other_files(tmp_path: 
     assert raw["allow"] == ["run_command(git status)"]
     assert raw["deny"] == ["write_file(.env)"]
     assert project_path.read_text(encoding="utf-8") == before_project
+
+
+def test_configured_mcp_namespace_rule_loads_when_server_is_offline(tmp_path: Path) -> None:
+    workspace = tmp_path / "workspace"
+    write(
+        workspace / ".mycode/permissions.yaml",
+        "allow:\n  - 'github__create-issue(call)'\n",
+    )
+
+    loaded = PermissionConfigLoader(
+        TOOLS,
+        tmp_path / "home",
+        mcp_tool_prefixes=("github__",),
+    ).load(workspace)
+
+    assert loaded.project.rules[0].tool == "github__create-issue"
+
+
+def test_unconfigured_dynamic_namespace_rule_is_rejected(tmp_path: Path) -> None:
+    workspace = tmp_path / "workspace"
+    write(
+        workspace / ".mycode/permissions.yaml",
+        "allow:\n  - 'unknown__tool(call)'\n",
+    )
+
+    with pytest.raises(ConfigError, match="未知工具"):
+        PermissionConfigLoader(TOOLS, tmp_path / "home").load(workspace)

@@ -57,7 +57,12 @@ def _read_yaml(path: Path) -> dict[str, Any]:
     return raw
 
 
-def _parse_layer(path: Path, source: RuleSource, known_tools: set[str]) -> PermissionLayer:
+def _parse_layer(
+    path: Path,
+    source: RuleSource,
+    known_tools: set[str],
+    allowed_tool_prefixes: tuple[str, ...] = (),
+) -> PermissionLayer:
     raw = _read_yaml(path)
     unknown = set(raw) - ALLOWED_FIELDS
     if unknown:
@@ -72,16 +77,30 @@ def _parse_layer(path: Path, source: RuleSource, known_tools: set[str]) -> Permi
             raise ConfigError(f"权限配置 `{path}` 的 {effect} 必须是字符串列表。")
         for value in values:
             try:
-                rules.append(parse_rule(value, effect, source, known_tools))
+                rules.append(
+                    parse_rule(
+                        value,
+                        effect,
+                        source,
+                        known_tools,
+                        allowed_tool_prefixes,
+                    )
+                )
             except ValueError as exc:
                 raise ConfigError(f"权限配置 `{path}`：{exc}") from exc
     return PermissionLayer(source=source, mode=mode, rules=tuple(rules))
 
 
 class PermissionConfigLoader:
-    def __init__(self, known_tools: set[str], user_home: Path | None = None) -> None:
+    def __init__(
+        self,
+        known_tools: set[str],
+        user_home: Path | None = None,
+        mcp_tool_prefixes: tuple[str, ...] = (),
+    ) -> None:
         self.known_tools = set(known_tools)
         self.user_home = user_home
+        self.mcp_tool_prefixes = tuple(mcp_tool_prefixes)
 
     def load(
         self,
@@ -90,9 +109,24 @@ class PermissionConfigLoader:
     ) -> PermissionConfigSet:
         root = workspace_root.resolve()
         home = (self.user_home or Path.home()).expanduser()
-        user = _parse_layer(home / ".mycode" / "permissions.yaml", "user", self.known_tools)
-        project = _parse_layer(root / ".mycode" / "permissions.yaml", "project", self.known_tools)
-        local = _parse_layer(root / ".mycode" / "permissions.local.yaml", "local", self.known_tools)
+        user = _parse_layer(
+            home / ".mycode" / "permissions.yaml",
+            "user",
+            self.known_tools,
+            self.mcp_tool_prefixes,
+        )
+        project = _parse_layer(
+            root / ".mycode" / "permissions.yaml",
+            "project",
+            self.known_tools,
+            self.mcp_tool_prefixes,
+        )
+        local = _parse_layer(
+            root / ".mycode" / "permissions.local.yaml",
+            "local",
+            self.known_tools,
+            self.mcp_tool_prefixes,
+        )
         if cli_mode is not None and cli_mode not in VALID_MODES:
             raise ConfigError("命令行权限模式必须是 strict、default 或 allow。")
         effective: PermissionMode = cli_mode or local.mode or project.mode or user.mode or "default"

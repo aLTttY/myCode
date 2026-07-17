@@ -11,12 +11,13 @@ from .agent.cancellation import CancellationToken
 from .agent.config import AgentRequest
 from .agent.runner import AgentRunner
 from .config import load_config
+from .mcp import MCPDiscoveryWarning, MCPManager, MCPManagerError, MCPTool
 from .permissions.approval import TerminalApprovalHandler
 from .permissions.config import PermissionConfigLoader
 from .permissions.service import PermissionService
 from .providers.factory import create_provider
 from .tools.registry import create_default_registry
-from .types import ConfigError, ProviderError, TokenUsage, ToolContext
+from .types import ConfigError, ProviderError, TokenUsage, ToolContext, ToolError
 
 
 # 支持的退出命令
@@ -57,27 +58,68 @@ def main(argv: Sequence[str] | None = None) -> int:
         registry = create_default_registry()
         known_tools = {spec.name for spec in registry.tool_specs()}
         workspace_root = Path.cwd()
-        permission_config = PermissionConfigLoader(known_tools).load(
+        mcp_tool_prefixes = tuple(
+            f"{server.name}__" for server in config.mcp_servers
+        )
+        permission_config = PermissionConfigLoader(
+            known_tools,
+            mcp_tool_prefixes=mcp_tool_prefixes,
+        ).load(
             workspace_root,
             args.permission_mode,
         )
         permission_service = PermissionService(
             permission_config,
             TerminalApprovalHandler(),
+            mcp_tool_prefixes=mcp_tool_prefixes,
         )
     except ConfigError as exc:
         print(f"配置错误：{exc.user_message}", file=sys.stderr)
         return 1
 
-    # 创建 Agent 执行器：
-    # provider 负责调用模型，registry 保存工具，workspace_root 限制工具工作目录
-    agent = AgentRunner(
-        provider,
-        full_registry=registry,
-        tool_context=ToolContext(workspace_root=workspace_root),
-        permission_service=permission_service,
-    )
+    mcp_manager = MCPManager(config.mcp_servers)
+    try:
+        try:
+            remote_tools, discovery_warnings = mcp_manager.discover()
+        except MCPManagerError as exc:
+            remote_tools = []
+            discovery_warnings = [
+                MCPDiscoveryWarning("mcp", "connect", exc.user_message)
+            ]
 
+        for remote_tool in remote_tools:
+            try:
+                registry.register(MCPTool(remote_tool, mcp_manager))
+            except ToolError as exc:
+                discovery_warnings.append(
+                    MCPDiscoveryWarning(
+                        remote_tool.server_name,
+                        "registration",
+                        exc.user_message,
+                    )
+                )
+
+        for warning in discovery_warnings:
+            print(
+                f"[mcp] {warning.server_name} {warning.stage} 失败：{warning.message}",
+                file=sys.stderr,
+            )
+
+        # 创建 Agent 执行器：
+        # provider 负责调用模型，registry 保存工具，workspace_root 限制工具工作目录
+        agent = AgentRunner(
+            provider,
+            full_registry=registry,
+            tool_context=ToolContext(workspace_root=workspace_root),
+            permission_service=permission_service,
+        )
+
+        return _run_interactive(agent)
+    finally:
+        mcp_manager.close()
+
+
+def _run_interactive(agent: AgentRunner) -> int:
     print("Mycode 已启动。输入 /plan 生成计划，/do 执行计划，exit、quit 或 退出 结束。")
 
     while True:
@@ -178,9 +220,6 @@ def main(argv: Sequence[str] | None = None) -> int:
 
         except ProviderError as exc:
             print(f"请求错误：{exc.user_message}", file=sys.stderr)
-
-    return 0
-
 
 def parse_agent_request(user_text: str) -> AgentRequest:
     """根据命令前缀决定 Agent 的运行模式。"""

@@ -4,9 +4,11 @@ Mycode 是一个命令行 AI 编程助手。当前版本支持交互式多轮对
 
 ## 安装依赖
 
+需要 Python 3.10 或更高版本。
+
 ```bash
 python3 -m venv .venv
-.venv/bin/python -m pip install httpx prompt_toolkit PyYAML pytest
+.venv/bin/python -m pip install -e ".[dev]"
 ```
 
 ## 配置
@@ -54,6 +56,41 @@ thinking:
 ```bash
 export DEEPSEEK_API_KEY="your-key"
 ```
+
+### MCP Server
+
+Mycode 启动时会发现外部 MCP Server 的工具，并以 `<server>__<tool>` 注册到工具中心。例如 Server `docs` 提供的 `search` 会成为 `docs__search`。支持本地子进程 stdio 和远程 Streamable HTTP：
+
+```yaml
+mcp_servers:
+  local-files:
+    transport: stdio
+    command: npx
+    args: ["-y", "@modelcontextprotocol/server-filesystem", "${MCP_ROOT}"]
+    env:
+      LOG_LEVEL: "${MCP_LOG_LEVEL}"
+
+  company-tools:
+    transport: http
+    url: "https://${MCP_HOST}/mcp"
+    headers:
+      Authorization: "Bearer ${MCP_TOKEN}"
+```
+
+MCP Server 配置有两层：用户级 `~/.mycode/config.yaml` 先加载，项目级 `./config.yaml`（或 `--config` 指定文件）后加载。不同名字的 Server 都会保留；同名时项目级定义整体覆盖用户级定义，不做字段拼接。Provider 配置始终来自项目级文件。
+
+`args`、`env`、`url` 和 `headers` 的字符串支持一个或多个 `${VAR}` 展开。变量未设置会在连接前产生配置错误，设置为空字符串则合法。stdio 子进程继承当前进程环境，配置中的 `env` 覆盖同名变量。HTTP 的协议 headers 和 Session ID 由 MCP SDK 管理，因此配置不能覆盖这些保留字段。
+
+单个 Server 连接、初始化或工具发现失败只输出警告，不影响其他 Server 或六个内置工具。非法名称、最终名称超过 64 字符、重复工具也只跳过冲突项；已经注册的工具不会被覆盖。会话和连接在进程内缓存，并在 CLI 退出时关闭。
+
+所有 MCP 工具都按有副作用工具处理并串行执行，不采信远端只读注解。权限规则目标固定为 `call`，例如：
+
+```yaml
+allow:
+  - "company-tools__search(call)"
+```
+
+default 模式的“本会话同意”会允许该 MCP 工具之后的不同参数调用，但重启后失效。当前只接收文本与 `structuredContent`；image、audio、embedded resource 和 resource link 会返回结构化的不支持错误。本阶段不实现 Resources、Prompts、Sampling、健康检查、自动重连或运行时动态重载工具。
 
 ## 运行
 

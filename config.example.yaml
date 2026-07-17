@@ -19,6 +19,31 @@ api_key: ${DEEPSEEK_API_KEY}
 #   enabled: true
 #   budget_tokens: 4096
 
+# MCP Server 可分别放在用户级 ~/.mycode/config.yaml 与本项目配置中。
+# 项目级同名 Server 会整体覆盖用户级定义；不同名 Server 会合并保留。
+mcp_servers:
+  local-files:
+    transport: stdio
+    command: npx
+    args:
+      - -y
+      - "@modelcontextprotocol/server-filesystem"
+      - "${MCP_ROOT}"
+    env:
+      LOG_LEVEL: "${MCP_LOG_LEVEL}"
+
+  company-tools:
+    transport: http
+    url: "https://${MCP_HOST}/mcp"
+    headers:
+      Authorization: "Bearer ${MCP_TOKEN}"
+
+# stdio 继承启动 Mycode 的环境，env 覆盖同名变量。
+# url、headers、args 和 env 支持完整或嵌入式 ${VAR}，未设置变量会阻止启动。
+# Agent 中的名称为 <server>__<tool>；权限规则写作 company-tools__search(call)。
+# HTTP 是 Streamable HTTP。当前只支持 text/structuredContent，不实现 Resources、
+# Prompts、Sampling、健康检查、自动重连或动态重载。
+
 # 权限配置与 Provider 配置分开存放：
 #   用户级：~/.mycode/permissions.yaml
 #   项目级：<workspace>/.mycode/permissions.yaml

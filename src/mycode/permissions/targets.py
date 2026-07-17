@@ -20,6 +20,9 @@ def _required_string(arguments: Mapping[str, object], key: str) -> str:
 
 
 class PermissionTargetResolver:
+    def __init__(self, mcp_tool_prefixes: tuple[str, ...] = ()) -> None:
+        self.mcp_tool_prefixes = tuple(mcp_tool_prefixes)
+
     def resolve(self, call: ToolCall, workspace_root: Path) -> PermissionRequest:
         if call.name in FILE_TOOLS:
             _, target = resolve_workspace_path(workspace_root, _required_string(call.arguments, "path"))
@@ -32,6 +35,11 @@ class PermissionTargetResolver:
             if not isinstance(path, str) or not path:
                 raise PermissionValidationError("invalid_target", "参数 `path` 必须是非空字符串。")
             _, target = resolve_workspace_path(workspace_root, path)
+        elif any(
+            call.name.startswith(prefix) and len(call.name) > len(prefix)
+            for prefix in self.mcp_tool_prefixes
+        ):
+            target = "call"
         else:
             raise PermissionValidationError("unknown_tool", f"未知工具：{call.name}")
         return PermissionRequest(

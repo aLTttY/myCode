@@ -74,3 +74,16 @@ def test_highest_matching_layer_wins() -> None:
 def test_no_matching_rule_returns_none() -> None:
     layer = PermissionLayer("user", rules=(parse_rule("write_file(*)", "allow", "user", TOOLS),))
     assert RuleEngine().decide(request("read_file", "README.md"), (layer,)) is None
+
+
+def test_parse_rule_accepts_configured_mcp_namespace_and_hyphen() -> None:
+    rule = parse_rule(
+        "github__create-issue(call)",
+        "allow",
+        "project",
+        TOOLS,
+        ("github__",),
+    )
+
+    assert rule.tool == "github__create-issue"
+    assert rule.match_type == "exact"

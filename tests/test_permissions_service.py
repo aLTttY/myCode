@@ -142,3 +142,52 @@ def test_run_command_ls_still_requires_approval(tmp_path: Path) -> None:
 
     assert not decision.allowed and decision.reason_code == "user_denied"
     assert len(approval.calls) == 1
+
+
+@pytest.mark.parametrize(
+    ("mode", "choice", "allowed"),
+    [
+        ("strict", None, False),
+        ("default", "allow_once", True),
+        ("allow", None, True),
+    ],
+)
+def test_mcp_tools_use_controlled_call_target(
+    tmp_path: Path,
+    mode: str,
+    choice: str | None,
+    allowed: bool,
+) -> None:
+    approval = FakeApproval([choice]) if choice else FakeApproval([])
+    service = PermissionService(config(mode), approval, ("github__",))
+
+    decision = service.authorize(
+        call("github__create-issue", token="hidden", title="demo"),
+        ToolContext(tmp_path),
+    )
+
+    assert decision.allowed is allowed
+    assert decision.target == "call"
+    if approval.calls:
+        assert approval.calls[0].target == "call"
+
+
+def test_mcp_session_allow_covers_later_arguments(tmp_path: Path) -> None:
+    approval = FakeApproval(["allow_session"])
+    service = PermissionService(config(), approval, ("github__",))
+
+    first = service.authorize(call("github__create-issue", title="one"), ToolContext(tmp_path))
+    second = service.authorize(call("github__create-issue", title="two"), ToolContext(tmp_path))
+
+    assert first.reason_code == "user_allow_session"
+    assert second.reason_code == "rule_allow"
+    assert len(approval.calls) == 1
+
+
+def test_unknown_non_mcp_tool_remains_rejected(tmp_path: Path) -> None:
+    decision = PermissionService(config("allow"), mcp_tool_prefixes=("github__",)).authorize(
+        call("missing", value="x"),
+        ToolContext(tmp_path),
+    )
+
+    assert not decision.allowed and decision.reason_code == "unknown_tool"

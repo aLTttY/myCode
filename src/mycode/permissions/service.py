@@ -26,12 +26,13 @@ class PermissionService:
         self,
         config: PermissionConfigSet,
         approval_handler: ApprovalHandler | None = None,
+        mcp_tool_prefixes: tuple[str, ...] = (),
     ) -> None:
         self.config = config
         self.approval_handler = approval_handler or DenyApprovalHandler()
         self._session_rules: list[PermissionRule] = []
         self._lock = RLock()
-        self._resolver = PermissionTargetResolver()
+        self._resolver = PermissionTargetResolver(mcp_tool_prefixes)
         self._rules = RuleEngine()
 
     @classmethod
@@ -39,6 +40,7 @@ class PermissionService:
         cls,
         mode: PermissionMode = "default",
         approval_handler: ApprovalHandler | None = None,
+        mcp_tool_prefixes: tuple[str, ...] = (),
     ) -> "PermissionService":
         if mode not in {"strict", "default", "allow"}:
             raise ValueError("权限模式必须是 strict、default 或 allow。")
@@ -48,7 +50,7 @@ class PermissionService:
             local=PermissionLayer("local"),
             effective_mode=mode,
         )
-        return cls(config, approval_handler)
+        return cls(config, approval_handler, mcp_tool_prefixes)
 
     def authorize(self, call: ToolCall, context: ToolContext) -> PermissionDecision:
         try:

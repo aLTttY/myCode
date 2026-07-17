@@ -13,6 +13,7 @@ def test_classify_tools() -> None:
     assert classify_tool("edit_file") == "side_effect"
     assert classify_tool("run_command") == "side_effect"
     assert classify_tool("unknown") == "side_effect"
+    assert classify_tool("github__create_issue") == "side_effect"
 
 
 def test_create_readonly_registry_contains_only_read_tools() -> None:

@@ -5,7 +5,7 @@ from pathlib import Path
 
 from mycode.agent.cancellation import CancellationToken
 from mycode.agent.executor import BatchToolExecutor
-from mycode.agent.tools import ToolBatch
+from mycode.agent.tools import ToolBatch, ToolBatcher
 from mycode.permissions.models import PermissionConfigSet, PermissionDecision, PermissionLayer
 from mycode.permissions.service import PermissionService
 from mycode.tools.registry import ToolRegistry, create_default_registry
@@ -118,6 +118,28 @@ def test_executor_runs_side_effect_batch_serially(tmp_path: Path) -> None:
     list(BatchToolExecutor(registry, context(tmp_path), AllowPermissions()).execute_batches([batch], CancellationToken()))
 
     assert record == ["write_file", "edit_file"]
+
+
+def test_executor_runs_mcp_tools_as_one_serial_side_effect_batch(tmp_path: Path) -> None:
+    record: list[str] = []
+    registry = ToolRegistry()
+    registry.register(RecordingTool("alpha__first", record))
+    registry.register(RecordingTool("alpha__second", record))
+    calls = (
+        ToolCall(id="1", name="alpha__first", arguments={}),
+        ToolCall(id="2", name="alpha__second", arguments={}),
+    )
+    batches = ToolBatcher().batch(calls)
+
+    list(
+        BatchToolExecutor(registry, context(tmp_path), AllowPermissions()).execute_batches(
+            batches,
+            CancellationToken(),
+        )
+    )
+
+    assert len(batches) == 1 and batches[0].safety == "side_effect"
+    assert record == ["alpha__first", "alpha__second"]
 
 
 def test_executor_runs_mixed_batches_without_crossing_order(tmp_path: Path) -> None:

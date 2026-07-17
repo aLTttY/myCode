@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from collections.abc import Mapping
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Literal
@@ -12,12 +13,33 @@ class ThinkingConfig:
 
 
 @dataclass(frozen=True)
+class StdioMCPServerConfig:
+    name: str
+    transport: Literal["stdio"]
+    command: str
+    args: tuple[str, ...] = ()
+    env: Mapping[str, str] | None = None
+
+
+@dataclass(frozen=True)
+class HTTPMCPServerConfig:
+    name: str
+    transport: Literal["http"]
+    url: str
+    headers: Mapping[str, str] | None = None
+
+
+MCPServerConfig = StdioMCPServerConfig | HTTPMCPServerConfig
+
+
+@dataclass(frozen=True)
 class AppConfig:
     protocol: str
     model: str
     base_url: str
     api_key: str
     thinking: ThinkingConfig | None = None
+    mcp_servers: tuple[MCPServerConfig, ...] = ()
 
 
 @dataclass(frozen=True)

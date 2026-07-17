@@ -4,6 +4,8 @@ import fnmatch
 import re
 from collections.abc import Iterable, Sequence
 
+from mycode.tools.registry import is_valid_tool_name
+
 from .models import (
     MatchType,
     PermissionDecision,
@@ -15,7 +17,7 @@ from .models import (
 )
 
 
-RULE_PATTERN = re.compile(r"^([A-Za-z_][A-Za-z0-9_]*)\((.+)\)$", re.DOTALL)
+RULE_PATTERN = re.compile(r"^([A-Za-z0-9_-]{1,64})\((.+)\)$", re.DOTALL)
 GLOB_PATTERN = re.compile(r"[*?[]")
 
 
@@ -24,6 +26,7 @@ def parse_rule(
     effect: RuleEffect,
     source: RuleSource,
     known_tools: Iterable[str],
+    allowed_tool_prefixes: Iterable[str] = (),
 ) -> PermissionRule:
     if not isinstance(expression, str):
         raise ValueError("权限规则必须是字符串。")
@@ -31,7 +34,13 @@ def parse_rule(
     if match is None:
         raise ValueError(f"无效权限规则：{expression!r}。应使用 工具名(模式)。")
     tool, pattern = match.groups()
-    if tool not in set(known_tools):
+    prefixes = tuple(allowed_tool_prefixes)
+    known = tool in set(known_tools)
+    allowed_dynamic = is_valid_tool_name(tool) and any(
+        tool.startswith(prefix) and len(tool) > len(prefix)
+        for prefix in prefixes
+    )
+    if not known and not allowed_dynamic:
         raise ValueError(f"权限规则引用未知工具：{tool}")
     match_type: MatchType = "glob" if GLOB_PATTERN.search(pattern) else "exact"
     return PermissionRule(tool=tool, pattern=pattern, effect=effect, source=source, match_type=match_type)

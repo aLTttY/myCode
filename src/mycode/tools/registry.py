@@ -1,10 +1,19 @@
 from __future__ import annotations
 
+import re
+
 from mycode.tools.base import Tool
 from mycode.tools.command import RunCommandTool
 from mycode.tools.files import EditFileTool, ReadFileTool, WriteFileTool
 from mycode.tools.search import FindFilesTool, SearchCodeTool
 from mycode.types import ToolError, ToolSpec
+
+
+TOOL_NAME_PATTERN = re.compile(r"^[A-Za-z0-9_-]{1,64}$")
+
+
+def is_valid_tool_name(name: str) -> bool:
+    return TOOL_NAME_PATTERN.fullmatch(name) is not None
 
 
 class ToolRegistry:
@@ -13,6 +22,10 @@ class ToolRegistry:
 
     def register(self, tool: Tool) -> None:
         name = tool.spec.name
+        if not is_valid_tool_name(name):
+            raise ToolError(
+                f"工具名 `{name}` 非法；只能使用字母、数字、下划线、连字符，且长度为 1-64。"
+            )
         if name in self._tools:
             raise ToolError(f"工具 `{name}` 已注册。")
         self._tools[name] = tool

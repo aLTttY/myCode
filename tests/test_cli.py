@@ -9,9 +9,17 @@ from prompt_toolkit.output import DummyOutput
 from mycode import cli
 from mycode.agent.config import AgentRequest
 from mycode.agent.events import AgentEvent
+from mycode.mcp import MCPDiscoveryWarning, MCPRemoteTool
 from mycode.permissions.approval import TerminalApprovalHandler, select_approval_choice
 from mycode.permissions.models import ApprovalPrompt, PermissionConfigSet, PermissionLayer
-from mycode.types import AppConfig, ConfigError, ProviderError, TokenUsage, ToolResult
+from mycode.types import (
+    AppConfig,
+    ConfigError,
+    ProviderError,
+    StdioMCPServerConfig,
+    TokenUsage,
+    ToolResult,
+)
 
 
 class FakeAgent:
@@ -110,7 +118,12 @@ def test_cli_permission_mode_overrides_config(monkeypatch: pytest.MonkeyPatch) -
     captured: list[str | None] = []
 
     class FakePermissionLoader:
-        def __init__(self, known_tools: set[str]) -> None:
+        def __init__(
+            self,
+            known_tools: set[str],
+            *,
+            mcp_tool_prefixes: tuple[str, ...] = (),
+        ) -> None:
             pass
 
         def load(self, workspace: object, mode: str | None = None) -> PermissionConfigSet:
@@ -129,6 +142,107 @@ def test_cli_permission_mode_overrides_config(monkeypatch: pytest.MonkeyPatch) -
 
     assert cli.main(["--permission-mode", "strict"]) == 0
     assert captured == ["strict"]
+
+
+def test_cli_registers_mcp_tools_and_closes_manager(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    captured_specs: list[str] = []
+
+    class FakeManager:
+        instances: list[FakeManager] = []
+
+        def __init__(self, servers: object) -> None:
+            self.servers = servers
+            self.close_calls = 0
+            self.instances.append(self)
+
+        def discover(self) -> tuple[list[MCPRemoteTool], list[MCPDiscoveryWarning]]:
+            return (
+                [
+                    MCPRemoteTool(
+                        server_name="alpha",
+                        remote_name="echo",
+                        exposed_name="alpha__echo",
+                        description="Echo text",
+                        input_schema={"type": "object"},
+                    )
+                ],
+                [MCPDiscoveryWarning("offline", "connect", "连接失败")],
+            )
+
+        def close(self) -> None:
+            self.close_calls += 1
+
+    class CapturingAgent:
+        def __init__(self, provider: object, *args: object, **kwargs: object) -> None:
+            registry = kwargs["full_registry"]
+            captured_specs.extend(spec.name for spec in registry.tool_specs())
+
+    config = AppConfig(
+        "deepseek",
+        "m",
+        "u",
+        "k",
+        mcp_servers=(StdioMCPServerConfig("alpha", "stdio", "ignored"),),
+    )
+    monkeypatch.setattr(cli, "load_config", lambda path: config)
+    monkeypatch.setattr(cli, "create_provider", lambda config: object())
+    monkeypatch.setattr(cli, "MCPManager", FakeManager)
+    monkeypatch.setattr(cli, "AgentRunner", CapturingAgent)
+    monkeypatch.setattr(cli, "read_user_input", lambda prompt: "exit")
+
+    assert cli.main([]) == 0
+    assert "alpha__echo" in captured_specs
+    assert FakeManager.instances[0].close_calls == 1
+    assert "[mcp] offline connect 失败：连接失败" in capsys.readouterr().err
+
+
+def test_cli_all_mcp_servers_can_fail_without_blocking_local_tools(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    captured_specs: list[str] = []
+
+    class FailedManager:
+        def __init__(self, servers: object) -> None:
+            self.close_calls = 0
+
+        def discover(self) -> tuple[list[MCPRemoteTool], list[MCPDiscoveryWarning]]:
+            return [], [MCPDiscoveryWarning("alpha", "initialize", "初始化失败")]
+
+        def close(self) -> None:
+            self.close_calls += 1
+
+    class CapturingAgent:
+        def __init__(self, provider: object, *args: object, **kwargs: object) -> None:
+            registry = kwargs["full_registry"]
+            captured_specs.extend(spec.name for spec in registry.tool_specs())
+
+    config = AppConfig(
+        "deepseek",
+        "m",
+        "u",
+        "k",
+        mcp_servers=(StdioMCPServerConfig("alpha", "stdio", "ignored"),),
+    )
+    monkeypatch.setattr(cli, "load_config", lambda path: config)
+    monkeypatch.setattr(cli, "create_provider", lambda config: object())
+    monkeypatch.setattr(cli, "MCPManager", FailedManager)
+    monkeypatch.setattr(cli, "AgentRunner", CapturingAgent)
+    monkeypatch.setattr(cli, "read_user_input", lambda prompt: "exit")
+
+    assert cli.main([]) == 0
+    assert captured_specs == [
+        "read_file",
+        "write_file",
+        "edit_file",
+        "run_command",
+        "find_files",
+        "search_code",
+    ]
+    assert "[mcp] alpha initialize 失败：初始化失败" in capsys.readouterr().err
 
 
 def test_terminal_approval_shows_context_and_uses_selector() -> None:
