@@ -112,8 +112,11 @@ def test_truncates_large_text_and_rejects_large_structured_content(tmp_path) -> 
 
     assert text_output.ok and text_output.message == "abcde"
     assert text_output.data["truncated"] is True
+    assert text_output.complete.message == "abcdefghij"
     assert not structured_output.ok
     assert structured_output.data["reason"] == "result_too_large"
+    assert structured_output.complete.ok
+    assert structured_output.complete.data["structured_content"] == {"value": "abcdefghij"}
 
 
 def test_maps_manager_error_without_leaking_details(tmp_path) -> None:

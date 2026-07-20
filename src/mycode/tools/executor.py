@@ -5,7 +5,7 @@ from concurrent.futures import ThreadPoolExecutor, TimeoutError
 from mycode.permissions.approval import safe_target_summary
 from mycode.permissions.service import PermissionService
 from mycode.tools.registry import ToolRegistry
-from mycode.types import ToolCall, ToolContext, ToolError, ToolResult
+from mycode.types import ToolCall, ToolContext, ToolError, ToolExecutionResult, ToolResult
 
 
 class ToolExecutor:
@@ -19,22 +19,26 @@ class ToolExecutor:
         self.context = context
         self.permission_service = permission_service or PermissionService.with_mode("default")
 
-    def execute(self, call: ToolCall) -> ToolResult:
+    def execute(self, call: ToolCall) -> ToolExecutionResult:
         try:
             tool = self.registry.get(call.name)
         except ToolError as exc:
-            return ToolResult(ok=False, message=exc.user_message, data={"tool": call.name})
+            return ToolExecutionResult.same(
+                ToolResult(ok=False, message=exc.user_message, data={"tool": call.name})
+            )
 
         decision = self.permission_service.authorize(call, self.context)
         if not decision.allowed:
-            return ToolResult(
-                ok=False,
-                message=decision.message,
-                data={
-                    "tool": call.name,
-                    "permission_reason": decision.reason_code,
-                    "permission_target": safe_target_summary(decision.target),
-                },
+            return ToolExecutionResult.same(
+                ToolResult(
+                    ok=False,
+                    message=decision.message,
+                    data={
+                        "tool": call.name,
+                        "permission_reason": decision.reason_code,
+                        "permission_target": safe_target_summary(decision.target),
+                    },
+                )
             )
 
         try:
@@ -44,14 +48,22 @@ class ToolExecutor:
                 result = future.result(timeout=self.context.timeout_seconds)
             except TimeoutError:
                 executor.shutdown(wait=False, cancel_futures=True)
-                return ToolResult(ok=False, message="工具执行超时。", data={"tool": call.name})
+                return ToolExecutionResult.same(
+                    ToolResult(ok=False, message="工具执行超时。", data={"tool": call.name})
+                )
             except Exception:
                 executor.shutdown(wait=False, cancel_futures=True)
                 raise
             else:
                 executor.shutdown(wait=True)
-                return result
+                if isinstance(result, ToolExecutionResult):
+                    return result
+                return ToolExecutionResult.same(result)
         except TimeoutError:
-            return ToolResult(ok=False, message="工具执行超时。", data={"tool": call.name})
+            return ToolExecutionResult.same(
+                ToolResult(ok=False, message="工具执行超时。", data={"tool": call.name})
+            )
         except Exception as exc:  # noqa: BLE001 - 工具边界必须结构化失败。
-            return ToolResult(ok=False, message=f"工具执行失败：{exc}", data={"tool": call.name})
+            return ToolExecutionResult.same(
+                ToolResult(ok=False, message=f"工具执行失败：{exc}", data={"tool": call.name})
+            )

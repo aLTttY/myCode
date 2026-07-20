@@ -1,10 +1,9 @@
 from __future__ import annotations
 
 from collections.abc import Mapping
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Literal
-
 
 @dataclass(frozen=True)
 class ThinkingConfig:
@@ -33,6 +32,13 @@ MCPServerConfig = StdioMCPServerConfig | HTTPMCPServerConfig
 
 
 @dataclass(frozen=True)
+class ContextConfig:
+    window_tokens: int
+    tool_result_threshold_tokens: int = 8_000
+    tool_batch_threshold_tokens: int = 16_000
+
+
+@dataclass(frozen=True)
 class AppConfig:
     protocol: str
     model: str
@@ -40,6 +46,9 @@ class AppConfig:
     api_key: str
     thinking: ThinkingConfig | None = None
     mcp_servers: tuple[MCPServerConfig, ...] = ()
+    context: ContextConfig = field(
+        default_factory=lambda: ContextConfig(window_tokens=128_000)
+    )
 
 
 @dataclass(frozen=True)
@@ -98,6 +107,28 @@ class ToolResult:
     ok: bool
     message: str
     data: dict[str, object]
+
+
+@dataclass(frozen=True)
+class ToolExecutionResult:
+    display: ToolResult
+    complete: ToolResult
+
+    @classmethod
+    def same(cls, result: ToolResult) -> ToolExecutionResult:
+        return cls(display=result, complete=result)
+
+    @property
+    def ok(self) -> bool:
+        return self.display.ok
+
+    @property
+    def message(self) -> str:
+        return self.display.message
+
+    @property
+    def data(self) -> dict[str, object]:
+        return self.display.data
 
 
 @dataclass(frozen=True)

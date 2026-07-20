@@ -20,6 +20,20 @@ def test_find_files_matches_and_skips_dirs(tmp_path: Path) -> None:
     assert result.data["matches"] == ["src/app.py"]
 
 
+def test_find_files_preserves_complete_view_before_character_truncation(tmp_path: Path) -> None:
+    for index in range(8):
+        (tmp_path / f"long-file-name-{index}.txt").write_text("x", encoding="utf-8")
+
+    result = FindFilesTool().run(
+        {"pattern": "*.txt"},
+        ToolContext(workspace_root=tmp_path, max_output_chars=20),
+    )
+
+    assert result.display.data["truncated"] is True
+    assert len(result.complete.data["matches"]) == 8
+    assert result.complete.data["truncated"] is False
+
+
 def test_search_code_text_and_regex(tmp_path: Path) -> None:
     (tmp_path / "app.py").write_text("hello agent\nbye\n", encoding="utf-8")
 

@@ -20,6 +20,7 @@ from mycode.types import (
     TokenUsage,
     ToolResult,
 )
+from mycode.context.models import CompactionReport
 
 
 class FakeAgent:
@@ -78,6 +79,33 @@ class TokenUsageAgent:
         yield AgentEvent(type="done", stop_reason="completed", message="任务完成。")
 
 
+class CompactAgent:
+    requests: list[AgentRequest] = []
+    compact_calls = 0
+
+    def __init__(self, provider: object, *args: object, **kwargs: object) -> None:
+        self.provider = provider
+
+    def run(self, request: AgentRequest, cancellation: object | None = None) -> Iterator[AgentEvent]:
+        self.requests.append(request)
+        yield AgentEvent(type="done", stop_reason="completed", message="任务完成。")
+
+    def compact(self) -> CompactionReport:
+        type(self).compact_calls += 1
+        return CompactionReport(
+            status="success",
+            trigger="manual",
+            before_tokens=100,
+            after_tokens=40,
+            budget_tokens=90,
+            offloaded_tool_results=2,
+            summarized_messages=5,
+        )
+
+    def close(self) -> str | None:
+        return None
+
+
 def test_cli_exits_on_exit_command(monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]) -> None:
     monkeypatch.setattr(cli, "load_config", lambda path: AppConfig("deepseek", "m", "u", "k"))
     monkeypatch.setattr(cli, "create_provider", lambda config: object())
@@ -112,6 +140,26 @@ def test_parse_agent_request_modes() -> None:
     assert cli.parse_agent_request("/plan 检查项目") == AgentRequest("检查项目", mode="plan")
     assert cli.parse_agent_request("/do 执行计划") == AgentRequest("执行计划", mode="do")
     assert cli.parse_agent_request("普通问题") == AgentRequest("普通问题", mode="default")
+
+
+def test_cli_compact_is_local_command_and_prints_safe_report(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    inputs = iter(["/compact", "exit"])
+    CompactAgent.requests = []
+    CompactAgent.compact_calls = 0
+    monkeypatch.setattr(cli, "load_config", lambda path: AppConfig("deepseek", "m", "u", "k"))
+    monkeypatch.setattr(cli, "create_provider", lambda config: object())
+    monkeypatch.setattr(cli, "AgentRunner", CompactAgent)
+    monkeypatch.setattr(cli, "read_user_input", lambda prompt: next(inputs))
+
+    assert cli.main([]) == 0
+
+    output = capsys.readouterr().out
+    assert CompactAgent.compact_calls == 1
+    assert CompactAgent.requests == []
+    assert "手动成功 before=100 after=40 budget=90 tools=2 summarized=5" in output
 
 
 def test_cli_permission_mode_overrides_config(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -197,6 +245,43 @@ def test_cli_registers_mcp_tools_and_closes_manager(
     assert "alpha__echo" in captured_specs
     assert FakeManager.instances[0].close_calls == 1
     assert "[mcp] offline connect 失败：连接失败" in capsys.readouterr().err
+
+
+def test_cli_cleanup_warning_does_not_block_mcp_close_or_expose_content(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    class FakeManager:
+        instances: list[FakeManager] = []
+
+        def __init__(self, servers: object) -> None:
+            self.close_calls = 0
+            self.instances.append(self)
+
+        def discover(self) -> tuple[list[MCPRemoteTool], list[MCPDiscoveryWarning]]:
+            return [], []
+
+        def close(self) -> None:
+            self.close_calls += 1
+
+    class CleanupWarningAgent:
+        def __init__(self, provider: object, *args: object, **kwargs: object) -> None:
+            pass
+
+        def close(self) -> str:
+            return "上下文会话目录清理失败（PermissionError）。"
+
+    monkeypatch.setattr(cli, "load_config", lambda path: AppConfig("deepseek", "m", "u", "k"))
+    monkeypatch.setattr(cli, "create_provider", lambda config: object())
+    monkeypatch.setattr(cli, "MCPManager", FakeManager)
+    monkeypatch.setattr(cli, "AgentRunner", CleanupWarningAgent)
+    monkeypatch.setattr(cli, "read_user_input", lambda prompt: "exit")
+
+    assert cli.main([]) == 0
+    captured = capsys.readouterr()
+    assert "[context] 上下文会话目录清理失败（PermissionError）。" in captured.err
+    assert "sensitive body" not in captured.err
+    assert FakeManager.instances[0].close_calls == 1
 
 
 def test_cli_all_mcp_servers_can_fail_without_blocking_local_tools(

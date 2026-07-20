@@ -4,7 +4,7 @@ from collections.abc import Mapping
 from pathlib import Path
 from typing import Protocol
 
-from mycode.types import ToolContext, ToolError, ToolResult, ToolSpec
+from mycode.types import ToolContext, ToolError, ToolExecutionResult, ToolResult, ToolSpec
 
 
 class Tool(Protocol):
@@ -12,7 +12,11 @@ class Tool(Protocol):
     def spec(self) -> ToolSpec:
         ...
 
-    def run(self, arguments: Mapping[str, object], context: ToolContext) -> ToolResult:
+    def run(
+        self,
+        arguments: Mapping[str, object],
+        context: ToolContext,
+    ) -> ToolResult | ToolExecutionResult:
         ...
 
 
@@ -70,3 +74,10 @@ def result_error(message: str, **data: object) -> ToolResult:
 
 def result_ok(message: str, **data: object) -> ToolResult:
     return ToolResult(ok=True, message=message, data=data)
+
+
+def execution_result(
+    display: ToolResult,
+    complete: ToolResult | None = None,
+) -> ToolExecutionResult:
+    return ToolExecutionResult(display=display, complete=complete or display)

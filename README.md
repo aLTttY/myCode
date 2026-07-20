@@ -28,6 +28,7 @@ protocol: deepseek
 model: deepseek-v4-pro
 base_url: https://api.deepseek.com
 api_key: ${DEEPSEEK_API_KEY}
+context_window_tokens: 128000
 ```
 
 OpenAI 示例：
@@ -37,6 +38,7 @@ protocol: openai
 model: gpt-4.1
 base_url: https://api.openai.com/v1
 api_key: ${OPENAI_API_KEY}
+context_window_tokens: 128000
 ```
 
 Anthropic 示例：
@@ -46,10 +48,13 @@ protocol: anthropic
 model: claude-sonnet-4-5
 base_url: https://api.anthropic.com
 api_key: ${ANTHROPIC_API_KEY}
+context_window_tokens: 200000
 thinking:
   enabled: true
   budget_tokens: 4096
 ```
+
+`context_window_tokens` 是必填项，应填写当前模型实际支持的上下文窗口。可选的 `tool_result_threshold_tokens` 和 `tool_batch_threshold_tokens` 默认分别为 8000 和 16000。
 
 不要把真实 API Key 写入配置文件。请使用环境变量：
 
@@ -116,6 +121,17 @@ PYTHONPATH=src .venv/bin/python -m mycode --permission-mode strict
 
 - `/plan <任务>`：Plan Mode，只开放 `read_file`、`find_files`、`search_code` 这类只读工具，让模型先观察项目并输出计划。
 - `/do <任务>`：Do Mode，开放完整工具集，用于根据任务或已有计划执行实际改动。
+- `/compact`：立即执行上下文轻量卸载与重量摘要，不会作为用户消息发送给模型，并显示压缩前后估算量。
+
+## 上下文管理
+
+Mycode 在每次模型请求前先检查工具结果。单个结果或同一轮结果合计过大时，完整内容会临时写入工作区的 `.mycode/context/<会话>/`，模型历史只保留首尾预览和可重新读取的相对路径。
+
+当累计历史接近窗口上限时，Mycode 会把较早历史压缩成六段结构化摘要，同时保留近期约 10K token 且至少 5 条消息。摘要和压缩边界作为 system 上下文发送；模型需要文件或代码细节时必须重新读取，不能根据摘要猜测。
+
+自动压缩预留 13K token 安全余量，`/compact` 使用 3K 余量。摘要连续失败三次后，本会话停止自动摘要，但仍可执行 `/compact`；手动成功后恢复。压缩后仍超预算时，请求不会发送，并会显示当前估算量和重试提示。
+
+上下文文件只供当前进程会话使用，正常退出时自动删除。异常崩溃可能留下文件，因此 `.mycode/context/` 默认被 Git 忽略。
 
 ## 工具系统
 

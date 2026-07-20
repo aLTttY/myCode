@@ -9,7 +9,7 @@ from mycode.agent.runner import AgentRunner
 from mycode.permissions.service import PermissionService
 from mycode.providers.base import ChatRequest, LLMProvider
 from mycode.tools.registry import create_default_registry
-from mycode.types import ProviderError, StreamEvent, ToolContext
+from mycode.types import ContextConfig, ProviderError, StreamEvent, TokenUsage, ToolContext
 
 
 class ScriptedProvider:
@@ -219,3 +219,49 @@ def test_agent_runner_repeats_full_mode_instruction_by_interval(tmp_path: Path) 
     assert provider.calls[0].dynamic_system_messages[1].full is True
     assert provider.calls[1].dynamic_system_messages[1].full is False
     assert provider.calls[2].dynamic_system_messages[1].full is True
+
+
+def test_agent_runner_records_successful_input_usage_anchor(tmp_path: Path) -> None:
+    provider = ScriptedProvider([
+        [
+            StreamEvent(type="token_usage", token_usage=TokenUsage(input_tokens=321, output_tokens=1)),
+            StreamEvent(type="text_delta", text="done"),
+            StreamEvent(type="message_done"),
+        ]
+    ])
+    agent = runner(provider, tmp_path)
+
+    list(agent.run(AgentRequest("hello")))
+
+    assert agent.context_manager.state.token_anchor is not None
+    assert agent.context_manager.state.token_anchor.input_tokens == 321
+
+
+def test_agent_runner_refuses_over_budget_request_before_provider_call(tmp_path: Path) -> None:
+    provider = ScriptedProvider([[StreamEvent(type="text_delta", text="must not run")]])
+    agent = AgentRunner(
+        provider,
+        create_default_registry(),
+        ToolContext(workspace_root=tmp_path),
+        permission_service=PermissionService.with_mode("allow"),
+        context_config=ContextConfig(window_tokens=1),
+    )
+
+    events = list(agent.run(AgentRequest("too large")))
+
+    assert provider.calls == []
+    assert any(event.type == "error" and event.stop_reason == "context_overflow" for event in events)
+    assert events[-1].stop_reason == "context_overflow"
+    assert "/compact" in events[-1].message
+
+
+def test_agent_runner_manual_compact_does_not_add_user_message(tmp_path: Path) -> None:
+    provider = ScriptedProvider([[StreamEvent(type="text_delta", text="done"), StreamEvent(type="message_done")]])
+    agent = runner(provider, tmp_path)
+    list(agent.run(AgentRequest("hello")))
+    before = agent.messages
+
+    report = agent.compact()
+
+    assert report.status == "not_needed"
+    assert agent.messages == before

@@ -18,6 +18,20 @@ def test_read_file_reads_workspace_file(tmp_path: Path) -> None:
     assert result.data["content"] == "hello"
 
 
+def test_read_file_preserves_complete_view_before_truncation(tmp_path: Path) -> None:
+    (tmp_path / "large.txt").write_text("abcdefghij", encoding="utf-8")
+
+    result = ReadFileTool().run(
+        {"path": "large.txt"},
+        ToolContext(workspace_root=tmp_path, max_output_chars=5),
+    )
+
+    assert result.display.data["content"] == "abcde"
+    assert result.display.data["truncated"] is True
+    assert result.complete.data["content"] == "abcdefghij"
+    assert result.complete.data["truncated"] is False
+
+
 def test_file_tools_reject_outside_path(tmp_path: Path) -> None:
     result = ReadFileTool().run({"path": "../outside.txt"}, context(tmp_path))
 

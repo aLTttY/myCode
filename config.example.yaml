@@ -3,18 +3,25 @@ protocol: deepseek
 model: deepseek-v4-pro
 base_url: https://api.deepseek.com
 api_key: ${DEEPSEEK_API_KEY}
+context_window_tokens: 128000
+
+# 可选。未配置时分别默认为 8000 和 16000。
+tool_result_threshold_tokens: 8000
+tool_batch_threshold_tokens: 16000
 
 # OpenAI 示例：
 # protocol: openai
 # model: gpt-4.1
 # base_url: https://api.openai.com/v1
 # api_key: ${OPENAI_API_KEY}
+# context_window_tokens: 128000
 
 # Anthropic 示例：
 # protocol: anthropic
 # model: claude-sonnet-4-5
 # base_url: https://api.anthropic.com
 # api_key: ${ANTHROPIC_API_KEY}
+# context_window_tokens: 200000
 # thinking:
 #   enabled: true
 #   budget_tokens: 4096

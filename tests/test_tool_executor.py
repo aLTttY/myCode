@@ -30,6 +30,7 @@ def test_executor_runs_registered_tool(tmp_path: Path) -> None:
     result = executor.execute(ToolCall(id="1", name="read_file", arguments={"path": "a.txt"}))
 
     assert result.ok is True
+    assert result.display is result.complete
 
 
 def test_default_executor_runs_read_tool_without_approval(tmp_path: Path) -> None:
@@ -50,6 +51,7 @@ def test_executor_wraps_unknown_tool(tmp_path: Path) -> None:
 
     assert result.ok is False
     assert "未知工具" in result.message
+    assert result.display is result.complete
 
 
 class BrokenTool:

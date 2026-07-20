@@ -7,8 +7,8 @@ from pathlib import Path
 
 from mycode.permissions.models import PermissionValidationError
 from mycode.permissions.sandbox import resolve_workspace_path
-from mycode.tools.base import optional_bool, require_str, result_error, result_ok, truncate_text
-from mycode.types import ToolContext, ToolError, ToolResult, ToolSpec
+from mycode.tools.base import execution_result, optional_bool, require_str, result_error, result_ok, truncate_text
+from mycode.types import ToolContext, ToolError, ToolExecutionResult, ToolResult, ToolSpec
 
 
 SKIP_DIRS = {".git", ".venv", "__pycache__", ".pytest_cache", ".mypy_cache", "node_modules"}
@@ -56,7 +56,7 @@ class FindFilesTool:
             },
         )
 
-    def run(self, arguments: Mapping[str, object], context: ToolContext) -> ToolResult:
+    def run(self, arguments: Mapping[str, object], context: ToolContext) -> ToolResult | ToolExecutionResult:
         try:
             pattern = require_str(arguments, "pattern")
             matches: list[str] = []
@@ -67,10 +67,15 @@ class FindFilesTool:
                     matches.append(relative)
                     if len(matches) >= MAX_MATCHES:
                         break
-            output, truncated = truncate_text("\n".join(matches), context.max_output_chars)
+            full_matches = list(matches)
+            output, truncated = truncate_text("\n".join(full_matches), context.max_output_chars)
             if truncated:
                 matches = output.splitlines()
-            return result_ok("文件搜索完成。", matches=matches, count=len(matches), truncated=truncated)
+            display = result_ok("文件搜索完成。", matches=matches, count=len(matches), truncated=truncated)
+            if not truncated:
+                return execution_result(display)
+            complete = result_ok("文件搜索完成。", matches=full_matches, count=len(full_matches), truncated=False)
+            return execution_result(display, complete)
         except ToolError as exc:
             return result_error(exc.user_message)
 

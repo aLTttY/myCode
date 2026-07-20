@@ -9,6 +9,8 @@ from mycode.types import ConfigError, HTTPMCPServerConfig, StdioMCPServerConfig
 
 def write_config(tmp_path: Path, content: str) -> Path:
     path = tmp_path / "config.yaml"
+    if "context_window_tokens:" not in content:
+        content = "context_window_tokens: 200000\n" + content
     path.write_text(content, encoding="utf-8")
     return path
 
@@ -35,6 +37,76 @@ api_key: ${TEST_API_KEY}
     assert config.model == "deepseek-v4-pro"
     assert config.base_url == "https://api.deepseek.com"
     assert config.api_key == "secret-value"
+    assert config.context.window_tokens == 200_000
+    assert config.context.tool_result_threshold_tokens == 8_000
+    assert config.context.tool_batch_threshold_tokens == 16_000
+
+
+def test_loads_context_threshold_overrides(tmp_path: Path) -> None:
+    path = write_config(
+        tmp_path,
+        """
+protocol: deepseek
+model: demo
+base_url: https://example.com
+api_key: key
+context_window_tokens: 64000
+tool_result_threshold_tokens: 4000
+tool_batch_threshold_tokens: 9000
+""",
+    )
+
+    config = load_project_config(path)
+
+    assert config.context.window_tokens == 64_000
+    assert config.context.tool_result_threshold_tokens == 4_000
+    assert config.context.tool_batch_threshold_tokens == 9_000
+
+
+def test_rejects_missing_context_window(tmp_path: Path) -> None:
+    path = tmp_path / "config.yaml"
+    path.write_text(
+        """
+protocol: deepseek
+model: demo
+base_url: https://example.com
+api_key: key
+""",
+        encoding="utf-8",
+    )
+
+    with pytest.raises(ConfigError, match="context_window_tokens"):
+        load_project_config(path)
+
+
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [
+        ("context_window_tokens", "false"),
+        ("context_window_tokens", "0"),
+        ("context_window_tokens", "-1"),
+        ("context_window_tokens", '"1000"'),
+        ("tool_result_threshold_tokens", "false"),
+        ("tool_result_threshold_tokens", "0"),
+        ("tool_batch_threshold_tokens", "-1"),
+    ],
+)
+def test_rejects_invalid_context_token_values(tmp_path: Path, field: str, value: str) -> None:
+    base_window = "" if field == "context_window_tokens" else "context_window_tokens: 64000"
+    path = write_config(
+        tmp_path,
+        f"""
+protocol: deepseek
+model: demo
+base_url: https://example.com
+api_key: key
+{base_window}
+{field}: {value}
+""",
+    )
+
+    with pytest.raises(ConfigError, match=field):
+        load_project_config(path)
 
 
 def test_rejects_missing_required_field(tmp_path: Path) -> None:

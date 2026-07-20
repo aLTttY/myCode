@@ -41,3 +41,5 @@ def test_run_command_truncates_output(tmp_path: Path) -> None:
 
     assert result.data["stdout"] == "abc"
     assert result.data["stdout_truncated"] is True
+    assert result.complete.data["stdout"] == "abcdef"
+    assert result.complete.data["stdout_truncated"] is False

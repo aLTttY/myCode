@@ -2,8 +2,10 @@ from __future__ import annotations
 
 from collections.abc import Mapping
 from pathlib import Path
+from threading import Event
 
 from mycode.agent.cancellation import CancellationToken
+from mycode.agent.events import AgentEvent
 from mycode.agent.executor import BatchToolExecutor
 from mycode.agent.tools import ToolBatch, ToolBatcher
 from mycode.permissions.models import PermissionConfigSet, PermissionDecision, PermissionLayer
@@ -55,6 +57,7 @@ def test_executor_runs_read_batch_and_returns_results(tmp_path: Path) -> None:
     assert sum(1 for event in events if getattr(event, "type", "") == "tool_call_started") == 2
     assert sum(1 for event in events if getattr(event, "type", "") == "tool_result") == 2
     assert sorted(item[0] for item in events if isinstance(item, tuple)) == ["1", "2"]
+    assert all(item[1].display is item[1].complete for item in events if isinstance(item, tuple))
 
 
 def test_read_batch_does_not_request_approval(tmp_path: Path) -> None:
@@ -100,6 +103,19 @@ class RecordingTool:
     def run(self, arguments: Mapping[str, object], context: ToolContext) -> ToolResult:
         self.record.append(self.spec.name)
         return ToolResult(ok=True, message=self.spec.name, data={})
+
+
+class CoordinatedReadTool(RecordingTool):
+    def __init__(self, name: str, record: list[str], release_first: Event) -> None:
+        super().__init__(name, record)
+        self.release_first = release_first
+
+    def run(self, arguments: Mapping[str, object], context: ToolContext) -> ToolResult:
+        if self.spec.name == "read_file":
+            assert self.release_first.wait(timeout=1)
+        else:
+            self.release_first.set()
+        return super().run(arguments, context)
 
 
 def test_executor_runs_side_effect_batch_serially(tmp_path: Path) -> None:
@@ -163,6 +179,36 @@ def test_executor_runs_mixed_batches_without_crossing_order(tmp_path: Path) -> N
 
     assert record == ["read_file", "write_file", "edit_file"]
     assert [item[0] for item in events if isinstance(item, tuple)] == ["1", "2", "3"]
+
+
+def test_concurrent_read_completion_keeps_original_call_order(tmp_path: Path) -> None:
+    record: list[str] = []
+    release_first = Event()
+    registry = ToolRegistry()
+    registry.register(CoordinatedReadTool("read_file", record, release_first))
+    registry.register(CoordinatedReadTool("find_files", record, release_first))
+    batch = ToolBatch(
+        safety="read",
+        calls=(
+            ToolCall(id="1", name="read_file", arguments={}),
+            ToolCall(id="2", name="find_files", arguments={}),
+        ),
+    )
+
+    events = list(
+        BatchToolExecutor(registry, context(tmp_path), AllowPermissions()).execute_batches(
+            [batch], CancellationToken()
+        )
+    )
+
+    completion_ids = [
+        event.tool_call_id
+        for event in events
+        if isinstance(event, AgentEvent) and event.type == "tool_result"
+    ]
+    history_ids = [item[0] for item in events if isinstance(item, tuple)]
+    assert completion_ids == ["2", "1"]
+    assert history_ids == ["1", "2"]
 
 
 def test_executor_returns_structured_unknown_tool_result(tmp_path: Path) -> None:

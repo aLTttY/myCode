@@ -9,7 +9,7 @@ from mycode.agent.tools import ToolBatch
 from mycode.permissions.service import PermissionService
 from mycode.tools.executor import ToolExecutor
 from mycode.tools.registry import ToolRegistry
-from mycode.types import ToolCall, ToolContext, ToolResult
+from mycode.types import ToolCall, ToolContext, ToolExecutionResult, ToolResult
 
 
 class BatchToolExecutor:
@@ -27,7 +27,7 @@ class BatchToolExecutor:
         self,
         batches: Sequence[ToolBatch],
         cancellation: CancellationToken,
-    ) -> Iterator[AgentEvent | tuple[str, ToolResult]]:
+    ) -> Iterator[AgentEvent | tuple[str, ToolExecutionResult]]:
         for batch in batches:
             if cancellation.is_cancelled():
                 return
@@ -40,7 +40,7 @@ class BatchToolExecutor:
         self,
         calls: Sequence[ToolCall],
         cancellation: CancellationToken,
-    ) -> Iterator[AgentEvent | tuple[str, ToolResult]]:
+    ) -> Iterator[AgentEvent | tuple[str, ToolExecutionResult]]:
         executor = ToolExecutor(self.registry, self.context, self.permission_service)
         for call in calls:
             if cancellation.is_cancelled():
@@ -56,7 +56,7 @@ class BatchToolExecutor:
                 type="tool_result",
                 tool_call_id=call.id,
                 tool_name=call.name,
-                tool_result=result,
+                tool_result=result.display,
             )
             yield (call.id, result)
 
@@ -64,7 +64,7 @@ class BatchToolExecutor:
         self,
         calls: Sequence[ToolCall],
         cancellation: CancellationToken,
-    ) -> Iterator[AgentEvent | tuple[str, ToolResult]]:
+    ) -> Iterator[AgentEvent | tuple[str, ToolExecutionResult]]:
         for call in calls:
             if cancellation.is_cancelled():
                 return
@@ -76,6 +76,7 @@ class BatchToolExecutor:
             )
 
         single_executor = ToolExecutor(self.registry, self.context, self.permission_service)
+        results: dict[str, ToolExecutionResult] = {}
         with ThreadPoolExecutor(max_workers=max(1, len(calls))) as pool:
             futures = {pool.submit(single_executor.execute, call): call for call in calls}
             for future in as_completed(futures):
@@ -85,11 +86,17 @@ class BatchToolExecutor:
                 try:
                     result = future.result()
                 except Exception as exc:  # noqa: BLE001 - agent 边界必须结构化失败。
-                    result = ToolResult(ok=False, message=f"工具执行失败：{exc}", data={"tool": call.name})
+                    result = ToolExecutionResult.same(
+                        ToolResult(ok=False, message=f"工具执行失败：{exc}", data={"tool": call.name})
+                    )
+                results[call.id] = result
                 yield AgentEvent(
                     type="tool_result",
                     tool_call_id=call.id,
                     tool_name=call.name,
-                    tool_result=result,
+                    tool_result=result.display,
                 )
+        for call in calls:
+            result = results.get(call.id)
+            if result is not None:
                 yield (call.id, result)

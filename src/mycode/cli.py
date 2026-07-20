@@ -17,6 +17,7 @@ from .permissions.config import PermissionConfigLoader
 from .permissions.service import PermissionService
 from .providers.factory import create_provider
 from .tools.registry import create_default_registry
+from .context.models import CompactionReport
 from .types import ConfigError, ProviderError, TokenUsage, ToolContext, ToolError
 
 
@@ -112,15 +113,21 @@ def main(argv: Sequence[str] | None = None) -> int:
             full_registry=registry,
             tool_context=ToolContext(workspace_root=workspace_root),
             permission_service=permission_service,
+            context_config=config.context,
         )
-
-        return _run_interactive(agent)
+        try:
+            return _run_interactive(agent)
+        finally:
+            close = getattr(agent, "close", None)
+            warning = close() if close is not None else None
+            if warning:
+                print(f"[context] {warning}", file=sys.stderr)
     finally:
         mcp_manager.close()
 
 
 def _run_interactive(agent: AgentRunner) -> int:
-    print("Mycode 已启动。输入 /plan 生成计划，/do 执行计划，exit、quit 或 退出 结束。")
+    print("Mycode 已启动。输入 /plan 生成计划，/do 执行计划，/compact 压缩上下文，exit、quit 或 退出 结束。")
 
     while True:
         try:
@@ -140,6 +147,11 @@ def _run_interactive(agent: AgentRunner) -> int:
         if user_text.lower() in EXIT_COMMANDS:
             print("已退出。")
             return 0
+
+        if user_text == "/compact":
+            report = agent.compact()
+            print(f"[context] {format_compaction_report(report)}", flush=True)
+            continue
 
         try:
             # 控制“● ”只在第一段模型文本到来时打印一次
@@ -194,6 +206,13 @@ def _run_interactive(agent: AgentRunner) -> int:
                     usage_text = format_token_usage(event.token_usage)
                     if usage_text:
                         print(f"\n[usage] {usage_text}", flush=True)
+
+                elif event.type == "context_status":
+                    if event.context_report is not None:
+                        print(
+                            f"\n[context] {format_compaction_report(event.context_report)}",
+                            flush=True,
+                        )
 
                 elif event.type == "done":
                     # 正常完成时不额外提示，异常停止时显示原因
@@ -271,6 +290,33 @@ def format_token_usage(usage: TokenUsage | None) -> str:
     ):
         parts.append("cache=unavailable")
 
+    return " ".join(parts)
+
+
+def format_compaction_report(report: CompactionReport) -> str:
+    status_labels = {
+        "success": "成功",
+        "failed": "失败",
+        "not_needed": "无需压缩",
+        "tripped": "已熔断",
+    }
+    trigger = "自动" if report.trigger == "automatic" else "手动"
+    parts = [
+        f"{trigger}{status_labels[report.status]}",
+        f"before={report.before_tokens}",
+        f"after={report.after_tokens}",
+        f"budget={report.budget_tokens}",
+    ]
+    if report.offloaded_tool_results:
+        parts.append(f"tools={report.offloaded_tool_results}")
+    if report.offloaded_user_messages:
+        parts.append(f"users={report.offloaded_user_messages}")
+    if report.summarized_messages:
+        parts.append(f"summarized={report.summarized_messages}")
+    if report.stage:
+        parts.append(f"stage={report.stage}")
+    if report.reason:
+        parts.append(f"reason={report.reason}")
     return " ".join(parts)
 
 

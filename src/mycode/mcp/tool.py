@@ -3,8 +3,8 @@ from __future__ import annotations
 import json
 from collections.abc import Mapping
 
-from mycode.tools.base import truncate_text
-from mycode.types import ToolContext, ToolResult, ToolSpec
+from mycode.tools.base import execution_result, truncate_text
+from mycode.types import ToolContext, ToolExecutionResult, ToolResult, ToolSpec
 
 from .manager import MCPManager
 from .models import MCPManagerError, MCPRemoteTool
@@ -28,7 +28,7 @@ class MCPTool:
         self,
         arguments: Mapping[str, object],
         context: ToolContext,
-    ) -> ToolResult:
+    ) -> ToolResult | ToolExecutionResult:
         try:
             result = self.manager.call_tool(
                 self.remote.server_name,
@@ -68,8 +68,10 @@ class MCPTool:
             for item in result.content
             if getattr(item, "type", None) == "text"
         )
-        text, truncated = truncate_text(text, context.max_output_chars)
+        full_text = text
+        text, truncated = truncate_text(full_text, context.max_output_chars)
         structured = getattr(result, "structuredContent", None)
+        structured_too_large = False
         if structured is not None:
             try:
                 serialized = json.dumps(
@@ -83,24 +85,35 @@ class MCPTool:
                     "MCP 工具返回的 structuredContent 不是有效 JSON 数据。",
                 )
             if len(serialized) > context.max_output_chars:
-                return self._failure(
-                    "result_too_large",
-                    "MCP 工具返回的 structuredContent 超过输出大小限制。",
-                )
+                structured_too_large = True
 
         is_error = bool(getattr(result, "isError", False))
-        message = text or ("MCP 工具返回错误。" if is_error else "MCP 工具调用成功。")
-        data: dict[str, object] = {
+        full_message = full_text or ("MCP 工具返回错误。" if is_error else "MCP 工具调用成功。")
+        complete_data: dict[str, object] = {
             "server": self.remote.server_name,
             "remote_tool": self.remote.remote_name,
         }
         if structured is not None:
-            data["structured_content"] = structured
-        if truncated:
-            data["truncated"] = True
+            complete_data["structured_content"] = structured
         if is_error:
-            data["reason"] = "remote_error"
-        return ToolResult(ok=not is_error, message=message, data=data)
+            complete_data["reason"] = "remote_error"
+        complete = ToolResult(ok=not is_error, message=full_message, data=complete_data)
+
+        if structured_too_large:
+            display = self._failure(
+                "result_too_large",
+                "MCP 工具返回的 structuredContent 超过输出大小限制。",
+            )
+            return execution_result(display, complete)
+
+        display_data = dict(complete_data)
+        if truncated:
+            display_data["truncated"] = True
+        display_message = text or ("MCP 工具返回错误。" if is_error else "MCP 工具调用成功。")
+        display = ToolResult(ok=not is_error, message=display_message, data=display_data)
+        if not truncated:
+            return execution_result(display)
+        return execution_result(display, complete)
 
     def _failure(self, reason: str, message: str) -> ToolResult:
         return ToolResult(

@@ -3,6 +3,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Literal
 
+from mycode.context.models import CompactionReport
 from mycode.types import TokenUsage, ToolResult
 
 
@@ -13,6 +14,7 @@ AgentStopReason = Literal[
     "unknown_tools",
     "stream_error",
     "tool_parse_error",
+    "context_overflow",
 ]
 
 
@@ -26,6 +28,7 @@ class AgentEvent:
         "progress",
         "done",
         "error",
+        "context_status",
     ]
     text: str = ""
     iteration: int = 0
@@ -37,6 +40,7 @@ class AgentEvent:
     stop_reason: AgentStopReason | None = None
     message: str = ""
     token_usage: TokenUsage | None = None
+    context_report: CompactionReport | None = None
 
 
 def progress_event(iteration: int, max_iterations: int, message: str = "") -> AgentEvent:

@@ -48,9 +48,9 @@ class ChatSession:
                 type="tool_finished",
                 tool_call_id=call.id,
                 tool_name=call.name,
-                tool_result=result,
+                tool_result=result.display,
             )
-            tool_results.append((call.id, result))
+            tool_results.append((call.id, result.display))
 
         for tool_call_id, result in tool_results:
             self.messages.append(

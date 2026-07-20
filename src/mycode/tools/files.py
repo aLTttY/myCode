@@ -2,8 +2,8 @@ from __future__ import annotations
 
 from collections.abc import Mapping
 
-from mycode.tools.base import require_str, require_string, resolve_workspace_path, result_error, result_ok, truncate_text
-from mycode.types import ToolContext, ToolError, ToolResult, ToolSpec
+from mycode.tools.base import execution_result, require_str, require_string, resolve_workspace_path, result_error, result_ok, truncate_text
+from mycode.types import ToolContext, ToolError, ToolExecutionResult, ToolResult, ToolSpec
 
 
 class ReadFileTool:
@@ -25,16 +25,20 @@ class ReadFileTool:
             },
         )
 
-    def run(self, arguments: Mapping[str, object], context: ToolContext) -> ToolResult:
+    def run(self, arguments: Mapping[str, object], context: ToolContext) -> ToolResult | ToolExecutionResult:
         try:
             path = resolve_workspace_path(context.workspace_root, require_str(arguments, "path"))
             if not path.exists():
                 return result_error("文件不存在。", path=str(path))
             if not path.is_file():
                 return result_error("目标路径不是文件。", path=str(path))
-            content = path.read_text(encoding="utf-8")
-            content, truncated = truncate_text(content, context.max_output_chars)
-            return result_ok("文件读取成功。", path=str(path), content=content, size=path.stat().st_size, truncated=truncated)
+            full_content = path.read_text(encoding="utf-8")
+            content, truncated = truncate_text(full_content, context.max_output_chars)
+            display = result_ok("文件读取成功。", path=str(path), content=content, size=path.stat().st_size, truncated=truncated)
+            if not truncated:
+                return execution_result(display)
+            complete = result_ok("文件读取成功。", path=str(path), content=full_content, size=path.stat().st_size, truncated=False)
+            return execution_result(display, complete)
         except ToolError as exc:
             return result_error(exc.user_message)
         except UnicodeDecodeError:

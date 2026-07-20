@@ -12,6 +12,7 @@ from .tools.registry import is_valid_tool_name
 from .types import (
     AppConfig,
     ConfigError,
+    ContextConfig,
     HTTPMCPServerConfig,
     MCPServerConfig,
     StdioMCPServerConfig,
@@ -24,6 +25,8 @@ ENV_PATTERN = re.compile(r"^\$\{([A-Za-z_][A-Za-z0-9_]*)\}$")
 ENV_REFERENCE_PATTERN = re.compile(r"\$\{([A-Za-z_][A-Za-z0-9_]*)\}")
 STDIO_FIELDS = {"transport", "command", "args", "env"}
 HTTP_FIELDS = {"transport", "url", "headers"}
+DEFAULT_TOOL_RESULT_THRESHOLD_TOKENS = 8_000
+DEFAULT_TOOL_BATCH_THRESHOLD_TOKENS = 16_000
 RESERVED_HTTP_HEADERS = {
     "accept",
     "content-type",
@@ -83,6 +86,7 @@ def load_config(
     api_key = _resolve_api_key(_required_str(raw, "api_key"))
     thinking = _parse_thinking(raw.get("thinking"))
     mcp_servers = _merge_mcp_servers(user_raw, raw, resolved_user_path, config_path)
+    context = _parse_context_config(raw)
 
     return AppConfig(
         protocol=protocol,
@@ -91,6 +95,7 @@ def load_config(
         api_key=api_key,
         thinking=thinking,
         mcp_servers=mcp_servers,
+        context=context,
     )
 
 
@@ -255,6 +260,41 @@ def _required_str(raw: dict[str, Any], key: str) -> str:
     if not isinstance(value, str) or not value.strip():
         raise ConfigError(f"配置字段 `{key}` 必须是非空字符串。")
     return value.strip()
+
+
+def _parse_context_config(raw: dict[str, Any]) -> ContextConfig:
+    return ContextConfig(
+        window_tokens=_positive_int(raw, "context_window_tokens", required=True),
+        tool_result_threshold_tokens=_positive_int(
+            raw,
+            "tool_result_threshold_tokens",
+            default=DEFAULT_TOOL_RESULT_THRESHOLD_TOKENS,
+        ),
+        tool_batch_threshold_tokens=_positive_int(
+            raw,
+            "tool_batch_threshold_tokens",
+            default=DEFAULT_TOOL_BATCH_THRESHOLD_TOKENS,
+        ),
+    )
+
+
+def _positive_int(
+    raw: dict[str, Any],
+    key: str,
+    *,
+    required: bool = False,
+    default: int | None = None,
+) -> int:
+    if key not in raw:
+        if required:
+            raise ConfigError(f"配置字段 `{key}` 必须是正整数。")
+        if default is None:
+            raise ConfigError(f"配置字段 `{key}` 缺少默认值。")
+        return default
+    value = raw[key]
+    if type(value) is not int or value <= 0:
+        raise ConfigError(f"配置字段 `{key}` 必须是正整数。")
+    return value
 
 
 def _resolve_api_key(value: str) -> str:
