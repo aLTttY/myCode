@@ -99,6 +99,43 @@ class ContextManager:
             )
         self._set_entries(tuple(entries))
 
+    def import_messages(self, messages: Sequence[Message]) -> None:
+        if self._entries:
+            raise ValueError("只能向空上下文导入恢复历史。")
+        entries: list[ManagedMessage] = []
+        index = 0
+        while index < len(messages):
+            message = messages[index]
+            if message.role == "tool":
+                raise ValueError("恢复历史包含孤立工具结果。")
+            entries.append(ManagedMessage(sequence=self._take_sequence(), message=message))
+            index += 1
+            if message.role != "assistant" or not message.tool_calls:
+                continue
+            expected = {call.id for call in message.tool_calls}
+            batch_id = f"batch-{self._next_batch}"
+            self._next_batch += 1
+            seen: set[str] = set()
+            while index < len(messages) and messages[index].role == "tool":
+                tool_message = messages[index]
+                if tool_message.tool_call_id not in expected or tool_message.tool_call_id in seen:
+                    raise ValueError("恢复历史工具结果关联非法。")
+                seen.add(tool_message.tool_call_id)
+                entries.append(
+                    ManagedMessage(
+                        sequence=self._take_sequence(),
+                        message=tool_message,
+                        complete_content=tool_message.content,
+                        batch_id=batch_id,
+                        source_id=tool_message.tool_call_id,
+                    )
+                )
+                index += 1
+            if seen != expected:
+                raise ValueError("恢复历史工具调用缺少结果。")
+        self._entries = tuple(entries)
+        self._state = ContextState(messages=self.messages)
+
     def prepare_request(
         self,
         template: ChatRequest,

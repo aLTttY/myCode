@@ -10,3 +10,5 @@ config.yaml
 .idea/
 .mycode/permissions.local.yaml
 .mycode/context/
+.mycode/sessions/
+.mycode/memory/

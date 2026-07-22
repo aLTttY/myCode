@@ -87,7 +87,7 @@ def optional_prompt_modules(options: PromptOptions) -> tuple[PromptModule, ...]:
         modules.append(
             PromptModule(
                 key="custom_instructions",
-                title="自定义指令",
+                title="自定义指令（按来源标注的优先级执行）",
                 content=options.custom_instructions.strip(),
                 stable=False,
             )
@@ -105,7 +105,7 @@ def optional_prompt_modules(options: PromptOptions) -> tuple[PromptModule, ...]:
         modules.append(
             PromptModule(
                 key="long_term_memory",
-                title="长期记忆",
+                title="长期记忆索引（项目级优先于用户级）",
                 content=options.long_term_memory.strip(),
                 stable=False,
             )

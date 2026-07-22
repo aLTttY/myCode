@@ -15,6 +15,7 @@ AgentStopReason = Literal[
     "stream_error",
     "tool_parse_error",
     "context_overflow",
+    "session_error",
 ]
 
 

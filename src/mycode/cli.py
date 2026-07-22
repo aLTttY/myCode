@@ -11,11 +11,14 @@ from .agent.cancellation import CancellationToken
 from .agent.config import AgentRequest
 from .agent.runner import AgentRunner
 from .config import load_config
+from .instructions import InstructionLoader
+from .memory import MemoryService, MemoryStore, MemoryWorker
 from .mcp import MCPDiscoveryWarning, MCPManager, MCPManagerError, MCPTool
 from .permissions.approval import TerminalApprovalHandler
 from .permissions.config import PermissionConfigLoader
 from .permissions.service import PermissionService
 from .providers.factory import create_provider
+from .sessions import SessionCatalog, SessionJournal
 from .tools.registry import create_default_registry
 from .context.models import CompactionReport
 from .types import ConfigError, ProviderError, TokenUsage, ToolContext, ToolError
@@ -50,12 +53,18 @@ def main(argv: Sequence[str] | None = None) -> int:
         default=None,
         help="覆盖本次进程的权限模式",
     )
+    parser.add_argument(
+        "--new",
+        action="store_true",
+        help="跳过自动恢复并创建新会话",
+    )
     args = parser.parse_args(argv)
 
     try:
         # 加载配置，并根据配置创建对应的大模型 Provider
         config = load_config(Path(args.config))
         provider = create_provider(config)
+        memory_provider = create_provider(config)
         registry = create_default_registry()
         known_tools = {spec.name for spec in registry.tool_specs()}
         workspace_root = Path.cwd()
@@ -79,6 +88,8 @@ def main(argv: Sequence[str] | None = None) -> int:
         return 1
 
     mcp_manager = MCPManager(config.mcp_servers)
+    journal = None
+    memory_worker = None
     try:
         try:
             remote_tools, discovery_warnings = mcp_manager.discover()
@@ -106,6 +117,36 @@ def main(argv: Sequence[str] | None = None) -> int:
                 file=sys.stderr,
             )
 
+        catalog = SessionCatalog(workspace_root)
+        cleanup = catalog.cleanup_expired()
+        for warning in cleanup.warnings:
+            print(f"[session] {warning.session_id} 清理失败：{warning.message}", file=sys.stderr)
+        restored = None if args.new else catalog.latest()
+        if restored is None or restored.summary is None:
+            journal = SessionJournal(workspace_root)
+            restored_messages = ()
+            time_gap_reminder = ""
+            print(f"[session] 新会话 {journal.session_id}")
+        else:
+            journal = SessionJournal(workspace_root, restored.summary.session_id)
+            restored_messages = restored.messages
+            time_gap_reminder = _time_gap_message(restored.gap) if restored.needs_time_gap_reminder else ""
+            print(
+                f"[session] 已恢复 {journal.session_id} messages={len(restored.messages)} "
+                f"bad_lines={restored.bad_line_count} truncated={restored.truncated_message_count}"
+            )
+
+        instruction_bundle = InstructionLoader().load(workspace_root)
+        for warning in instruction_bundle.warnings:
+            print(f"[instructions] {warning.code}: {warning.source} -> {warning.target}", file=sys.stderr)
+        memory_store = MemoryStore(workspace_root)
+        for scope in ("project", "user"):
+            try:
+                memory_store.reconcile(scope)
+            except Exception as exc:
+                print(f"[memory] {scope} 索引协调失败（{type(exc).__name__}）。", file=sys.stderr)
+        memory_worker = MemoryWorker(MemoryService(memory_provider, memory_store))
+
         # 创建 Agent 执行器：
         # provider 负责调用模型，registry 保存工具，workspace_root 限制工具工作目录
         agent = AgentRunner(
@@ -114,6 +155,12 @@ def main(argv: Sequence[str] | None = None) -> int:
             tool_context=ToolContext(workspace_root=workspace_root),
             permission_service=permission_service,
             context_config=config.context,
+            session_journal=journal,
+            instruction_bundle=instruction_bundle,
+            memory_store=memory_store,
+            memory_worker=memory_worker,
+            restored_messages=restored_messages,
+            time_gap_reminder=time_gap_reminder,
         )
         try:
             return _run_interactive(agent)
@@ -122,14 +169,21 @@ def main(argv: Sequence[str] | None = None) -> int:
             warning = close() if close is not None else None
             if warning:
                 print(f"[context] {warning}", file=sys.stderr)
+            if journal is not None:
+                journal.close()
+            if memory_worker is not None:
+                for notice in memory_worker.drain(0):
+                    if notice.code != "updated":
+                        print(f"[memory] {notice.message}", file=sys.stderr)
     finally:
         mcp_manager.close()
 
 
 def _run_interactive(agent: AgentRunner) -> int:
-    print("Mycode 已启动。输入 /plan 生成计划，/do 执行计划，/compact 压缩上下文，exit、quit 或 退出 结束。")
+    print("Mycode 已启动。输入 /plan 生成计划，/do 执行计划，/compact 压缩上下文，/new 新建会话，exit、quit 或 退出 结束。")
 
     while True:
+        _print_memory_notices(agent)
         try:
             user_text = read_user_input("> ").strip()
         except KeyboardInterrupt:
@@ -151,6 +205,17 @@ def _run_interactive(agent: AgentRunner) -> int:
         if user_text == "/compact":
             report = agent.compact()
             print(f"[context] {format_compaction_report(report)}", flush=True)
+            continue
+
+        if user_text == "/new":
+            switch = getattr(agent, "new_session", None)
+            if switch is None:
+                print("[session] 当前 Agent 不支持新建会话。", file=sys.stderr)
+                continue
+            session_id, warnings = switch()
+            print(f"[session] 新会话 {session_id}", flush=True)
+            for warning in warnings:
+                print(f"[session] {warning}", file=sys.stderr)
             continue
 
         try:
@@ -231,6 +296,7 @@ def _run_interactive(agent: AgentRunner) -> int:
 
             # 本轮回答结束后换行，避免下一次输入提示符粘在后面
             print()
+            _print_memory_notices(agent)
 
         except KeyboardInterrupt:
             # Agent 执行过程中按 Ctrl+C，只取消本轮任务，不退出 CLI
@@ -239,6 +305,23 @@ def _run_interactive(agent: AgentRunner) -> int:
 
         except ProviderError as exc:
             print(f"请求错误：{exc.user_message}", file=sys.stderr)
+
+
+def _print_memory_notices(agent: AgentRunner) -> None:
+    take = getattr(agent, "take_memory_notices", None)
+    if take is None:
+        return
+    for notice in take():
+        if notice.code != "updated":
+            print(f"[memory] {notice.message}", file=sys.stderr)
+
+
+def _time_gap_message(gap) -> str:
+    if gap is None:
+        return ""
+    hours = max(0, int(gap.total_seconds() // 3600))
+    amount = f"{hours // 24} 天" if hours >= 48 else f"{hours} 小时"
+    return f"距上次会话活动约 {amount}。文件、依赖、服务和需求状态可能已变化，请先核实再继续。"
 
 def parse_agent_request(user_text: str) -> AgentRequest:
     """根据命令前缀决定 Agent 的运行模式。"""

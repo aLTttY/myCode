@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from collections.abc import Iterator
+from pathlib import Path
 
 import pytest
 from prompt_toolkit.input import create_pipe_input
@@ -17,10 +18,18 @@ from mycode.types import (
     ConfigError,
     ProviderError,
     StdioMCPServerConfig,
+    Message,
     TokenUsage,
     ToolResult,
 )
 from mycode.context.models import CompactionReport
+from mycode.sessions import SessionJournal
+
+
+@pytest.fixture(autouse=True)
+def isolate_cli_workspace(monkeypatch: pytest.MonkeyPatch, tmp_path) -> None:
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("HOME", str(tmp_path / "home"))
 
 
 class FakeAgent:
@@ -160,6 +169,50 @@ def test_cli_compact_is_local_command_and_prints_safe_report(
     assert CompactAgent.compact_calls == 1
     assert CompactAgent.requests == []
     assert "手动成功 before=100 after=40 budget=90 tools=2 summarized=5" in output
+
+
+def test_cli_new_is_local_command(monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]) -> None:
+    inputs = iter(["/new", "exit"])
+
+    class NewAgent(FakeAgent):
+        requests = []
+
+        def new_session(self):
+            return "20260721-120000-abcd", ()
+
+    monkeypatch.setattr(cli, "load_config", lambda path: AppConfig("deepseek", "m", "u", "k"))
+    monkeypatch.setattr(cli, "create_provider", lambda config: object())
+    monkeypatch.setattr(cli, "AgentRunner", NewAgent)
+    monkeypatch.setattr(cli, "read_user_input", lambda prompt: next(inputs))
+
+    assert cli.main([]) == 0
+    assert NewAgent.requests == []
+    assert "新会话 20260721-120000-abcd" in capsys.readouterr().out
+
+
+def test_cli_default_restores_but_new_flag_skips_history(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    journal = SessionJournal(tmp_path)
+    journal.append(Message(role="user", content="restore me"))
+    journal.append(Message(role="assistant", content="saved"))
+    journal.close()
+    captured: list[tuple[Message, ...]] = []
+
+    class CapturingRestoreAgent:
+        def __init__(self, provider, *args, **kwargs):
+            captured.append(tuple(kwargs["restored_messages"]))
+
+        def close(self):
+            return None
+
+    monkeypatch.setattr(cli, "load_config", lambda path: AppConfig("deepseek", "m", "u", "k"))
+    monkeypatch.setattr(cli, "create_provider", lambda config: object())
+    monkeypatch.setattr(cli, "AgentRunner", CapturingRestoreAgent)
+    monkeypatch.setattr(cli, "read_user_input", lambda prompt: "exit")
+
+    assert cli.main([]) == 0
+    assert [message.content for message in captured[-1]] == ["restore me", "saved"]
+    assert cli.main(["--new"]) == 0
+    assert captured[-1] == ()
 
 
 def test_cli_permission_mode_overrides_config(monkeypatch: pytest.MonkeyPatch) -> None:
