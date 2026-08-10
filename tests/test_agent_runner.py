@@ -6,6 +6,7 @@ from pathlib import Path
 from mycode.agent.cancellation import CancellationToken
 from mycode.agent.config import AgentConfig, AgentRequest
 from mycode.agent.runner import AgentRunner
+from mycode.context.models import CompactionReport
 from mycode.permissions.service import PermissionService
 from mycode.providers.base import ChatRequest, LLMProvider
 from mycode.tools.registry import create_default_registry
@@ -265,3 +266,35 @@ def test_agent_runner_manual_compact_does_not_add_user_message(tmp_path: Path) -
 
     assert report.status == "not_needed"
     assert agent.messages == before
+
+
+def test_agent_runner_context_status_is_local_and_mode_aware(tmp_path: Path) -> None:
+    provider = ScriptedProvider([])
+    agent = runner(provider, tmp_path)
+
+    default_status = agent.context_status("default")
+    plan_status = agent.context_status("plan")
+
+    assert provider.calls == []
+    assert default_status.message_count == 0
+    assert plan_status.message_count == 0
+    assert default_status.window_tokens == plan_status.window_tokens
+    assert default_status.estimated_tokens >= plan_status.estimated_tokens
+
+
+def test_agent_runner_compact_can_override_last_request_mode(tmp_path: Path) -> None:
+    provider = ScriptedProvider([])
+    agent = runner(provider, tmp_path)
+    agent._last_request = AgentRequest("last", mode="default")
+    captured_tools: list[set[str]] = []
+
+    def fake_compact(request: ChatRequest) -> CompactionReport:
+        captured_tools.append({tool.name for tool in request.tools})
+        return CompactionReport("not_needed", "manual", 1, 1, 1)
+
+    agent.context_manager.compact = fake_compact  # type: ignore[method-assign]
+
+    agent.compact("plan")
+
+    assert captured_tools == [{"read_file", "find_files", "search_code"}]
+    assert provider.calls == []

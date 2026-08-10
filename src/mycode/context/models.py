@@ -3,7 +3,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Literal
 
-from mycode.types import ContextConfig
+from mycode.types import ContextConfig, TokenUsage
 
 if TYPE_CHECKING:
     from mycode.providers.base import ChatRequest
@@ -56,6 +56,7 @@ class ManagedMessage:
 class SummaryOutput:
     summary: str
     headings: tuple[str, ...]
+    token_usage: TokenUsage | None = None
 
 
 CompactionStatus = Literal["success", "failed", "not_needed", "tripped"]
@@ -74,6 +75,7 @@ class CompactionReport:
     summarized_messages: int = 0
     stage: str = ""
     reason: str = ""
+    summary_token_usage: TokenUsage | None = None
 
 
 @dataclass(frozen=True)
@@ -91,3 +93,12 @@ class ContextState:
     consecutive_summary_failures: int = 0
     automatic_summary_tripped: bool = False
     token_anchor: TokenAnchor | None = None
+
+
+@dataclass(frozen=True)
+class ContextStatus:
+    estimated_tokens: int
+    window_tokens: int
+    message_count: int
+    has_summary: bool
+    automatic_summary_tripped: bool

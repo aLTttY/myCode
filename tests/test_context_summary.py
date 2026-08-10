@@ -7,7 +7,7 @@ import pytest
 from mycode.context.prompts import SUMMARY_HEADINGS, SUMMARY_SYSTEM_PROMPT
 from mycode.context.summary import SummaryFailure, SummaryService, parse_summary_response
 from mycode.providers.base import ChatRequest
-from mycode.types import Message, ProviderError, StreamEvent
+from mycode.types import Message, ProviderError, StreamEvent, TokenUsage
 
 
 def valid_response() -> str:
@@ -35,9 +35,11 @@ def test_summary_prompt_forbids_tools_and_requires_draft_then_final() -> None:
 
 
 def test_summary_request_has_no_tools_and_discards_draft() -> None:
+    usage = TokenUsage(input_tokens=12, output_tokens=4, total_tokens=16)
     provider = ScriptedProvider(
         [
             StreamEvent(type="text_delta", text=valid_response()),
+            StreamEvent(type="token_usage", token_usage=usage),
             StreamEvent(type="message_done"),
         ]
     )
@@ -50,13 +52,16 @@ def test_summary_request_has_no_tools_and_discards_draft() -> None:
     assert request.tools == ()
     assert request.cache_static_content is False
     assert "旧摘要" in request.messages[0].content
+    assert output.token_usage == usage
 
 
 def test_summary_rejects_tool_calls_without_executing_them() -> None:
+    usage = TokenUsage(input_tokens=7, output_tokens=2, total_tokens=9)
     provider = ScriptedProvider(
         [
             StreamEvent(type="tool_call_delta", tool_call_id="1", tool_name="read_file"),
             StreamEvent(type="text_delta", text=valid_response()),
+            StreamEvent(type="token_usage", token_usage=usage),
             StreamEvent(type="message_done"),
         ]
     )
@@ -65,6 +70,24 @@ def test_summary_rejects_tool_calls_without_executing_them() -> None:
         SummaryService(provider).summarize([])
 
     assert caught.value.stage == "tool_call"
+    assert caught.value.token_usage == usage
+
+
+def test_summary_format_failure_preserves_usage() -> None:
+    usage = TokenUsage(input_tokens=5, output_tokens=1, total_tokens=6)
+    provider = ScriptedProvider(
+        [
+            StreamEvent(type="text_delta", text="invalid"),
+            StreamEvent(type="token_usage", token_usage=usage),
+            StreamEvent(type="message_done"),
+        ]
+    )
+
+    with pytest.raises(SummaryFailure) as caught:
+        SummaryService(provider).summarize([])
+
+    assert caught.value.stage == "format"
+    assert caught.value.token_usage == usage
 
 
 @pytest.mark.parametrize(

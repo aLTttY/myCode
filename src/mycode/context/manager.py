@@ -20,6 +20,7 @@ from .models import (
     CompactionReport,
     CompactionTrigger,
     ContextConfig,
+    ContextStatus,
     ContextState,
     ContextUnit,
     ManagedMessage,
@@ -62,6 +63,21 @@ class ContextManager:
     @property
     def state(self) -> ContextState:
         return self._state
+
+    def status(self, template: ChatRequest) -> ContextStatus:
+        request = self._build_request(
+            template,
+            self._entries,
+            self._state.summary,
+            self._state.boundary,
+        )
+        return ContextStatus(
+            estimated_tokens=self.estimator.estimate(request),
+            window_tokens=self.config.window_tokens,
+            message_count=len(self._entries),
+            has_summary=bool(self._state.summary),
+            automatic_summary_tripped=self._state.automatic_summary_tripped,
+        )
 
     def append_user(self, content: str) -> None:
         self._append(ManagedMessage(sequence=self._take_sequence(), message=Message(role="user", content=content)))
@@ -214,8 +230,10 @@ class ContextManager:
             )
 
         early_messages = tuple(message for unit in early for message in unit.messages)
+        summary_token_usage: TokenUsage | None = None
         try:
             summary = self.summary_service.summarize(early_messages, self._state.summary)
+            summary_token_usage = summary.token_usage
             early_entry_count = sum(unit.message_count for unit in early)
             early_entries = candidate[:early_entry_count]
             recent_entries = candidate[early_entry_count:]
@@ -260,7 +278,17 @@ class ContextManager:
         except (SummaryFailure, ContextStorageError) as exc:
             transaction.rollback()
             stage = exc.stage if isinstance(exc, SummaryFailure) else "storage"
-            return self._summary_failure(trigger, original_request, before, budget, stage, str(exc))
+            if isinstance(exc, SummaryFailure):
+                summary_token_usage = exc.token_usage
+            return self._summary_failure(
+                trigger,
+                original_request,
+                before,
+                budget,
+                stage,
+                str(exc),
+                summary_token_usage=summary_token_usage,
+            )
 
         transaction.commit()
         self._entries = tuple(summarized_candidate)
@@ -281,6 +309,7 @@ class ContextManager:
             offloaded_tool_results=offloaded_tools,
             offloaded_user_messages=offloaded_users,
             summarized_messages=len(early_messages),
+            summary_token_usage=summary_token_usage,
         )
         return PreparedContext(True, final_request, report)
 
@@ -402,6 +431,8 @@ class ContextManager:
         budget: int,
         stage: str,
         reason: str,
+        *,
+        summary_token_usage: TokenUsage | None = None,
     ) -> PreparedContext:
         failures = self._state.consecutive_summary_failures + 1
         tripped = failures >= MAX_SUMMARY_FAILURES
@@ -418,6 +449,7 @@ class ContextManager:
             budget,
             stage=stage,
             reason=reason,
+            summary_token_usage=summary_token_usage,
         )
         return PreparedContext(False, request, report)
 
@@ -466,6 +498,7 @@ class ContextManager:
         summarized_messages=0,
         stage="",
         reason="",
+        summary_token_usage=None,
     ) -> CompactionReport:
         return CompactionReport(
             status=status,
@@ -478,4 +511,5 @@ class ContextManager:
             summarized_messages=summarized_messages,
             stage=stage,
             reason=reason,
+            summary_token_usage=summary_token_usage,
         )

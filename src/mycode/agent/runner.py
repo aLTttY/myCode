@@ -12,12 +12,12 @@ from mycode.agent.events import AgentEvent, done_event, progress_event
 from mycode.agent.executor import BatchToolExecutor
 from mycode.agent.tools import ToolBatcher, create_readonly_registry
 from mycode.context.manager import ContextManager
-from mycode.context.models import CompactionReport
+from mycode.context.models import CompactionReport, ContextStatus
 from mycode.instructions import InstructionBundle
 from mycode.memory import MemoryStore, MemoryWorker, TurnSnapshot
 from mycode.permissions.service import PermissionService
 from mycode.prompts.builder import EnvironmentInfo, PromptBuilder
-from mycode.prompts.modes import DynamicInstruction
+from mycode.prompts.modes import DynamicInstruction, PromptMode
 from mycode.prompts.modules import PromptOptions
 from mycode.providers.base import ChatRequest, LLMProvider
 from mycode.sessions import SessionError, SessionJournal
@@ -205,11 +205,19 @@ class AgentRunner:
             return create_readonly_registry(self.full_registry)
         return self.full_registry
 
-    def compact(self) -> CompactionReport:
+    def compact(self, mode: PromptMode | None = None) -> CompactionReport:
         request = self._last_request or AgentRequest(text="", mode="default")
+        if mode is not None:
+            request = AgentRequest(text=request.text, mode=mode)
         registry = self._registry_for_request(request)
         template = self._chat_request_template(request, registry, 1)
         return self.context_manager.compact(template)
+
+    def context_status(self, mode: PromptMode = "default") -> ContextStatus:
+        request = AgentRequest(text="", mode=mode)
+        registry = self._registry_for_request(request)
+        template = self._chat_request_template(request, registry, 1)
+        return self.context_manager.status(template)
 
     def close(self) -> str | None:
         warnings: list[str] = []

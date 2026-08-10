@@ -2,12 +2,11 @@ from __future__ import annotations
 
 import json
 import re
-from dataclasses import asdict
-from dataclasses import dataclass
+from dataclasses import asdict, dataclass, replace
 from typing import Sequence
 
 from mycode.providers.base import ChatRequest, LLMProvider
-from mycode.types import Message, ProviderError
+from mycode.types import Message, ProviderError, TokenUsage
 
 from .models import SummaryOutput
 from .prompts import SUMMARY_HEADINGS, SUMMARY_SYSTEM_PROMPT
@@ -17,6 +16,7 @@ from .prompts import SUMMARY_HEADINGS, SUMMARY_SYSTEM_PROMPT
 class SummaryFailure(Exception):
     stage: str
     reason: str
+    token_usage: TokenUsage | None = None
 
     def __str__(self) -> str:
         return self.reason
@@ -34,20 +34,31 @@ class SummaryService:
         request = self._request(messages, previous_summary)
         parts: list[str] = []
         saw_tool_call = False
+        token_usage: TokenUsage | None = None
         try:
             for event in self.provider.stream_chat(request):
                 if event.type == "text_delta":
                     parts.append(event.text)
                 elif event.type in {"tool_call_delta", "tool_call_done"}:
                     saw_tool_call = True
+                elif event.type == "token_usage":
+                    token_usage = event.token_usage
                 elif event.type == "message_done":
                     break
         except ProviderError as exc:
-            raise SummaryFailure("api", "摘要 API 调用失败。") from exc
+            raise SummaryFailure("api", "摘要 API 调用失败。", token_usage) from exc
 
         if saw_tool_call:
-            raise SummaryFailure("tool_call", "摘要模型违反约束并尝试调用工具。")
-        return parse_summary_response("".join(parts))
+            raise SummaryFailure(
+                "tool_call",
+                "摘要模型违反约束并尝试调用工具。",
+                token_usage,
+            )
+        try:
+            output = parse_summary_response("".join(parts))
+        except SummaryFailure as exc:
+            raise replace(exc, token_usage=token_usage) from exc
+        return replace(output, token_usage=token_usage)
 
     def _request(
         self,

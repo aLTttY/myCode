@@ -12,7 +12,7 @@ from mycode.context.prompts import SUMMARY_HEADINGS
 from mycode.context.storage import ContextStorageError
 from mycode.context.summary import SummaryFailure
 from mycode.providers.base import ChatRequest
-from mycode.types import Message, ToolCall, ToolExecutionResult, ToolResult
+from mycode.types import Message, TokenUsage, ToolCall, ToolExecutionResult, ToolResult
 
 
 class UnusedProvider:
@@ -21,22 +21,28 @@ class UnusedProvider:
 
 
 class SuccessfulSummary:
-    def __init__(self) -> None:
+    def __init__(self, usage: TokenUsage | None = None) -> None:
         self.calls = []
+        self.usage = usage
 
     def summarize(self, messages, previous_summary="") -> SummaryOutput:
         self.calls.append((tuple(messages), previous_summary))
         text = "\n".join(f"{heading}\n内容" for heading in SUMMARY_HEADINGS)
-        return SummaryOutput(summary=text, headings=SUMMARY_HEADINGS)
+        return SummaryOutput(
+            summary=text,
+            headings=SUMMARY_HEADINGS,
+            token_usage=self.usage,
+        )
 
 
 class FailingSummary:
-    def __init__(self) -> None:
+    def __init__(self, usage: TokenUsage | None = None) -> None:
         self.calls = 0
+        self.usage = usage
 
     def summarize(self, messages, previous_summary="") -> SummaryOutput:
         self.calls += 1
-        raise SummaryFailure("api", "摘要 API 调用失败。")
+        raise SummaryFailure("api", "摘要 API 调用失败。", self.usage)
 
 
 def template() -> ChatRequest:
@@ -252,3 +258,60 @@ def test_manual_compact_reports_not_needed_without_early_history(tmp_path: Path)
 
     assert report.status == "not_needed"
     assert context.messages == (Message(role="user", content="short"),)
+
+
+def test_status_is_readonly_and_does_not_call_summary(tmp_path: Path) -> None:
+    summary = SuccessfulSummary()
+    context = configured_manager(tmp_path, summary_service=summary)
+    context.append_user("目标")
+    state_before = context.state
+    messages_before = context.messages
+
+    status = context.status(template())
+
+    assert status.message_count == 1
+    assert status.window_tokens == 100_000
+    assert status.estimated_tokens > 0
+    assert status.has_summary is False
+    assert status.automatic_summary_tripped is False
+    assert summary.calls == []
+    assert context.state is state_before
+    assert context.messages == messages_before
+
+
+def test_compaction_report_propagates_summary_usage(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    configure_small_recent_window(monkeypatch)
+    usage = TokenUsage(input_tokens=20, output_tokens=5, total_tokens=25)
+    context = configured_manager(
+        tmp_path,
+        window=1_400,
+        summary_service=SuccessfulSummary(usage),
+    )
+    prepare_heavy_history(context)
+
+    report = context.compact(template())
+
+    assert report.status == "success"
+    assert report.summary_token_usage == usage
+
+
+def test_failed_compaction_report_preserves_summary_usage(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    configure_small_recent_window(monkeypatch)
+    usage = TokenUsage(input_tokens=11, output_tokens=2, total_tokens=13)
+    context = configured_manager(
+        tmp_path,
+        window=1_400,
+        summary_service=FailingSummary(usage),
+    )
+    prepare_heavy_history(context)
+
+    report = context.compact(template())
+
+    assert report.status == "failed"
+    assert report.summary_token_usage == usage
