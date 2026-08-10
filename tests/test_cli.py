@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from collections.abc import Iterator
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 from prompt_toolkit.input import create_pipe_input
@@ -10,6 +11,7 @@ from prompt_toolkit.output import DummyOutput
 from mycode import cli
 from mycode.agent.config import AgentRequest
 from mycode.agent.events import AgentEvent
+from mycode.commands import CommandRegistrationError, REVIEW_PROMPT
 from mycode.mcp import MCPDiscoveryWarning, MCPRemoteTool
 from mycode.permissions.approval import TerminalApprovalHandler, select_approval_choice
 from mycode.permissions.models import ApprovalPrompt, PermissionConfigSet, PermissionLayer
@@ -22,7 +24,7 @@ from mycode.types import (
     TokenUsage,
     ToolResult,
 )
-from mycode.context.models import CompactionReport
+from mycode.context.models import CompactionReport, ContextStatus
 from mycode.sessions import SessionJournal
 
 
@@ -99,7 +101,7 @@ class CompactAgent:
         self.requests.append(request)
         yield AgentEvent(type="done", stop_reason="completed", message="任务完成。")
 
-    def compact(self) -> CompactionReport:
+    def compact(self, mode="default") -> CompactionReport:
         type(self).compact_calls += 1
         return CompactionReport(
             status="success",
@@ -143,12 +145,6 @@ def test_cli_prints_streaming_text(monkeypatch: pytest.MonkeyPatch, capsys: pyte
     assert "● 你好" in output
     assert FakeAgent.requests == [AgentRequest("你好")]
     assert prompts == ["> ", "> "]
-
-
-def test_parse_agent_request_modes() -> None:
-    assert cli.parse_agent_request("/plan 检查项目") == AgentRequest("检查项目", mode="plan")
-    assert cli.parse_agent_request("/do 执行计划") == AgentRequest("执行计划", mode="do")
-    assert cli.parse_agent_request("普通问题") == AgentRequest("普通问题", mode="default")
 
 
 def test_cli_compact_is_local_command_and_prints_safe_report(
@@ -379,6 +375,7 @@ def test_cli_all_mcp_servers_can_fail_without_blocking_local_tools(
         "run_command",
         "find_files",
         "search_code",
+        "read_git_changes",
     ]
     assert "[mcp] alpha initialize 失败：初始化失败" in capsys.readouterr().err
 
@@ -562,3 +559,289 @@ def test_cli_skips_empty_token_usage(monkeypatch: pytest.MonkeyPatch, capsys: py
 
     assert cli.main([]) == 0
     assert "[usage]" not in capsys.readouterr().out
+
+
+class StatefulAgent:
+    instances: list[StatefulAgent] = []
+
+    def __init__(self, provider: object, *args: object, **kwargs: object) -> None:
+        self.provider = provider
+        self.requests: list[AgentRequest] = []
+        self.context_status_calls: list[str] = []
+        self.session_journal = kwargs["session_journal"]
+        self.new_calls = 0
+        self.instances.append(self)
+
+    def run(
+        self,
+        request: AgentRequest,
+        cancellation: object | None = None,
+    ) -> Iterator[AgentEvent]:
+        self.requests.append(request)
+        yield AgentEvent(
+            type="token_usage",
+            token_usage=TokenUsage(input_tokens=11, output_tokens=7, total_tokens=18),
+        )
+        yield AgentEvent(type="done", stop_reason="completed", message="任务完成。")
+
+    def context_status(self, mode="default") -> ContextStatus:
+        self.context_status_calls.append(mode)
+        return ContextStatus(120, 1_000, len(self.requests) * 2, False, False)
+
+    def compact(self, mode="default") -> CompactionReport:
+        return CompactionReport("not_needed", "manual", 120, 120, 900)
+
+    def new_session(self):
+        self.new_calls += 1
+        self.session_journal = SimpleNamespace(session_id="20260810-120000-abcd")
+        return self.session_journal.session_id, ()
+
+    def take_memory_notices(self):
+        return ()
+
+    def close(self):
+        return None
+
+
+class CapturingPromptSession:
+    instances: list[CapturingPromptSession] = []
+
+    def __init__(self, **kwargs: object) -> None:
+        self.kwargs = kwargs
+        self.initial_toolbar = kwargs["bottom_toolbar"]()
+        self.toolbar_values: list[str] = []
+        self.app = SimpleNamespace(is_running=True, invalidate=self._invalidate)
+        self.instances.append(self)
+
+    def _invalidate(self) -> None:
+        toolbar = self.kwargs["bottom_toolbar"]
+        self.toolbar_values.append(toolbar())
+
+
+class CountingMCPManager:
+    instances: list[CountingMCPManager] = []
+
+    def __init__(self, servers: object) -> None:
+        self.discover_calls = 0
+        self.close_calls = 0
+        self.instances.append(self)
+
+    def discover(self):
+        self.discover_calls += 1
+        return [], []
+
+    def close(self) -> None:
+        self.close_calls += 1
+
+
+def _prepare_stateful_cli(monkeypatch: pytest.MonkeyPatch) -> list[object]:
+    providers: list[object] = []
+    StatefulAgent.instances = []
+    CapturingPromptSession.instances = []
+    CountingMCPManager.instances = []
+    monkeypatch.setattr(
+        cli,
+        "load_config",
+        lambda path: AppConfig("deepseek", "state-model", "sensitive-url", "secret-key"),
+    )
+
+    def create(config: object) -> object:
+        provider = object()
+        providers.append(provider)
+        return provider
+
+    monkeypatch.setattr(cli, "create_provider", create)
+    monkeypatch.setattr(cli, "AgentRunner", StatefulAgent)
+    monkeypatch.setattr(cli, "PromptSession", CapturingPromptSession)
+    monkeypatch.setattr(cli, "MCPManager", CountingMCPManager)
+    return providers
+
+
+def test_command_registration_failure_happens_before_configuration_or_provider(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    calls: list[str] = []
+
+    def fail_registry():
+        raise CommandRegistrationError("status 与 st 冲突")
+
+    monkeypatch.setattr(cli, "create_default_command_registry", fail_registry)
+    monkeypatch.setattr(cli, "load_config", lambda path: calls.append("config"))
+    monkeypatch.setattr(cli, "create_provider", lambda config: calls.append("provider"))
+
+    assert cli.main([]) == 1
+    assert calls == []
+    assert "命令注册错误" in capsys.readouterr().err
+
+
+def test_slash_command_end_to_end_routes_only_plain_and_review_to_agent(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    providers = _prepare_stateful_cli(monkeypatch)
+    inputs = iter(
+        [
+            "/p",
+            "检查当前实现",
+            "/status",
+            "/review",
+            "/d",
+            "/clear",
+            "/help status",
+            "exit",
+        ]
+    )
+    clear_calls: list[bool] = []
+    monkeypatch.setattr(cli, "read_user_input", lambda prompt: next(inputs))
+    monkeypatch.setattr(cli, "clear", lambda: clear_calls.append(True))
+
+    assert cli.main([]) == 0
+
+    agent = StatefulAgent.instances[0]
+    assert agent.requests == [
+        AgentRequest("检查当前实现", mode="plan"),
+        AgentRequest(REVIEW_PROMPT, mode="plan"),
+    ]
+    assert CapturingPromptSession.instances[0].toolbar_values == [
+        "[PLAN]",
+        "[DEFAULT]",
+    ]
+    assert CapturingPromptSession.instances[0].initial_toolbar == "[DEFAULT]"
+    assert len(CapturingPromptSession.instances) == 1
+    session_kwargs = CapturingPromptSession.instances[0].kwargs
+    assert session_kwargs["complete_while_typing"] is False
+    assert session_kwargs["bottom_toolbar"]() == "[DEFAULT]"
+    assert clear_calls == [True]
+    assert len(providers) == 2
+    assert CountingMCPManager.instances[0].discover_calls == 1
+    assert CountingMCPManager.instances[0].close_calls == 1
+
+    captured = capsys.readouterr()
+    assert "mode=plan provider=deepseek model=state-model" in captured.out
+    assert "[usage] input=11 output=7 total=18" in captured.out
+    assert "命令：/status" in captured.out
+    assert "sensitive-url" not in captured.out
+    assert "secret-key" not in captured.out
+
+
+def test_local_status_commands_do_not_send_agent_requests_or_repeat_discovery(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    providers = _prepare_stateful_cli(monkeypatch)
+    inputs = iter(["/session", "/memory", "/permission", "/status", "exit"])
+    monkeypatch.setattr(cli, "read_user_input", lambda prompt: next(inputs))
+
+    assert cli.main([]) == 0
+
+    agent = StatefulAgent.instances[0]
+    assert agent.requests == []
+    assert len(providers) == 2
+    assert CountingMCPManager.instances[0].discover_calls == 1
+    output = capsys.readouterr().out
+    assert "origin=new" in output
+    assert "worker=idle pending=0" in output
+    assert "priority=session > local > project > user" in output
+    assert "source=default" in output
+    assert "[usage] unavailable" in output
+
+
+def test_clear_preserves_mode_session_and_last_usage(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    _prepare_stateful_cli(monkeypatch)
+    clear_calls: list[bool] = []
+    inputs = iter(["/plan", "建立状态", "/clear", "/status", "exit"])
+    monkeypatch.setattr(cli, "read_user_input", lambda prompt: next(inputs))
+    monkeypatch.setattr(cli, "clear", lambda: clear_calls.append(True))
+
+    assert cli.main([]) == 0
+
+    assert clear_calls == [True]
+    output = capsys.readouterr().out
+    assert "mode=plan provider=deepseek model=state-model" in output
+    assert "[usage] input=11 output=7 total=18" in output
+    assert "origin=new" in output
+
+
+def test_review_is_one_shot_plan_and_does_not_change_default_mode(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _prepare_stateful_cli(monkeypatch)
+    inputs = iter(["/review", "继续执行", "exit"])
+    monkeypatch.setattr(cli, "read_user_input", lambda prompt: next(inputs))
+
+    assert cli.main([]) == 0
+
+    assert StatefulAgent.instances[0].requests == [
+        AgentRequest(REVIEW_PROMPT, mode="plan"),
+        AgentRequest("继续执行", mode="default"),
+    ]
+    assert CapturingPromptSession.instances[0].kwargs["bottom_toolbar"]() == "[DEFAULT]"
+
+
+def test_new_session_preserves_plan_mode_and_clears_last_token(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    _prepare_stateful_cli(monkeypatch)
+    inputs = iter(["/plan", "建立上下文", "/new", "/status", "exit"])
+    monkeypatch.setattr(cli, "read_user_input", lambda prompt: next(inputs))
+
+    assert cli.main([]) == 0
+
+    agent = StatefulAgent.instances[0]
+    assert agent.requests == [AgentRequest("建立上下文", mode="plan")]
+    assert agent.new_calls == 1
+    assert CapturingPromptSession.instances[0].kwargs["bottom_toolbar"]() == "[PLAN]"
+    output = capsys.readouterr().out
+    assert "session=20260810-120000-abcd origin=new" in output
+    assert "[usage] unavailable" in output
+
+
+@pytest.mark.parametrize(
+    ("failure", "expected"),
+    [(KeyboardInterrupt(), "已退出"), (EOFError(), "")],
+)
+def test_cli_input_control_flow_is_preserved(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    failure: BaseException,
+    expected: str,
+) -> None:
+    _prepare_stateful_cli(monkeypatch)
+
+    def fail(prompt: str) -> str:
+        raise failure
+
+    monkeypatch.setattr(cli, "read_user_input", fail)
+
+    assert cli.main([]) == 0
+    assert expected in capsys.readouterr().out
+
+
+def test_agent_keyboard_interrupt_cancels_only_current_turn(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    class InterruptingAgent(StatefulAgent):
+        def run(self, request, cancellation=None):
+            self.requests.append(request)
+            if request.text == "interrupt":
+                raise KeyboardInterrupt
+            yield AgentEvent(type="done", stop_reason="completed", message="任务完成。")
+
+    _prepare_stateful_cli(monkeypatch)
+    InterruptingAgent.instances = []
+    monkeypatch.setattr(cli, "AgentRunner", InterruptingAgent)
+    inputs = iter(["interrupt", "继续", "exit"])
+    monkeypatch.setattr(cli, "read_user_input", lambda prompt: next(inputs))
+
+    assert cli.main([]) == 0
+    assert [request.text for request in InterruptingAgent.instances[0].requests] == [
+        "interrupt",
+        "继续",
+    ]
+    assert "已取消" in capsys.readouterr().out

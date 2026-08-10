@@ -5,17 +5,35 @@ from pathlib import Path
 import sys
 from collections.abc import Sequence
 
-from prompt_toolkit import prompt
+from prompt_toolkit import PromptSession, prompt
+from prompt_toolkit.shortcuts import clear
+from prompt_toolkit.shortcuts.prompt import CompleteStyle
 
 from .agent.cancellation import CancellationToken
 from .agent.config import AgentRequest
 from .agent.runner import AgentRunner
+from .commands import (
+    ApplicationStatus,
+    CommandDispatcher,
+    CommandRegistrationError,
+    InputRouter,
+    MemoryStatus,
+    PermissionSourceStatus,
+    PermissionStatus,
+    RuntimeMode,
+    SessionStatus,
+    SlashCommandCompleter,
+    TokenStatus,
+    create_default_command_registry,
+    create_slash_command_key_bindings,
+)
 from .config import load_config
 from .instructions import InstructionLoader
 from .memory import MemoryService, MemoryStore, MemoryWorker
 from .mcp import MCPDiscoveryWarning, MCPManager, MCPManagerError, MCPTool
 from .permissions.approval import TerminalApprovalHandler
 from .permissions.config import PermissionConfigLoader
+from .permissions.models import PermissionConfigSet
 from .permissions.service import PermissionService
 from .providers.factory import create_provider
 from .sessions import SessionCatalog, SessionJournal
@@ -24,15 +42,17 @@ from .context.models import CompactionReport
 from .types import ConfigError, ProviderError, TokenUsage, ToolContext, ToolError
 
 
-# 支持的退出命令
-EXIT_COMMANDS = {"exit", "quit", "退出"}
-
 # 未指定 --config 时使用的默认配置文件
 DEFAULT_CONFIG_PATH = "config.yaml"
 
 
+_ACTIVE_PROMPT_SESSION: PromptSession[str] | None = None
+
+
 def read_user_input(prompt_text: str) -> str:
     """读取终端输入。"""
+    if _ACTIVE_PROMPT_SESSION is not None:
+        return _ACTIVE_PROMPT_SESSION.prompt(prompt_text)
     return prompt(prompt_text)
 
 
@@ -61,12 +81,18 @@ def main(argv: Sequence[str] | None = None) -> int:
     args = parser.parse_args(argv)
 
     try:
+        command_registry = create_default_command_registry()
+    except CommandRegistrationError as exc:
+        print(f"命令注册错误：{exc}", file=sys.stderr)
+        return 1
+
+    try:
         # 加载配置，并根据配置创建对应的大模型 Provider
         config = load_config(Path(args.config))
         provider = create_provider(config)
         memory_provider = create_provider(config)
-        registry = create_default_registry()
-        known_tools = {spec.name for spec in registry.tool_specs()}
+        tool_registry = create_default_registry()
+        known_tools = {spec.name for spec in tool_registry.tool_specs()}
         workspace_root = Path.cwd()
         mcp_tool_prefixes = tuple(
             f"{server.name}__" for server in config.mcp_servers
@@ -101,7 +127,7 @@ def main(argv: Sequence[str] | None = None) -> int:
 
         for remote_tool in remote_tools:
             try:
-                registry.register(MCPTool(remote_tool, mcp_manager))
+                tool_registry.register(MCPTool(remote_tool, mcp_manager))
             except ToolError as exc:
                 discovery_warnings.append(
                     MCPDiscoveryWarning(
@@ -126,11 +152,13 @@ def main(argv: Sequence[str] | None = None) -> int:
             journal = SessionJournal(workspace_root)
             restored_messages = ()
             time_gap_reminder = ""
+            session_origin = "new"
             print(f"[session] 新会话 {journal.session_id}")
         else:
             journal = SessionJournal(workspace_root, restored.summary.session_id)
             restored_messages = restored.messages
             time_gap_reminder = _time_gap_message(restored.gap) if restored.needs_time_gap_reminder else ""
+            session_origin = "restored"
             print(
                 f"[session] 已恢复 {journal.session_id} messages={len(restored.messages)} "
                 f"bad_lines={restored.bad_line_count} truncated={restored.truncated_message_count}"
@@ -151,7 +179,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         # provider 负责调用模型，registry 保存工具，workspace_root 限制工具工作目录
         agent = AgentRunner(
             provider,
-            full_registry=registry,
+            full_registry=tool_registry,
             tool_context=ToolContext(workspace_root=workspace_root),
             permission_service=permission_service,
             context_config=config.context,
@@ -163,7 +191,18 @@ def main(argv: Sequence[str] | None = None) -> int:
             time_gap_reminder=time_gap_reminder,
         )
         try:
-            return _run_interactive(agent)
+            return _run_interactive(
+                agent,
+                command_registry=command_registry,
+                config=config,
+                permission_config=permission_config,
+                permission_service=permission_service,
+                memory_store=memory_store,
+                memory_worker=memory_worker,
+                workspace_root=workspace_root,
+                session_origin=session_origin,
+                permission_mode_override=args.permission_mode,
+            )
         finally:
             close = getattr(agent, "close", None)
             warning = close() if close is not None else None
@@ -179,132 +218,318 @@ def main(argv: Sequence[str] | None = None) -> int:
         mcp_manager.close()
 
 
-def _run_interactive(agent: AgentRunner) -> int:
-    print("Mycode 已启动。输入 /plan 生成计划，/do 执行计划，/compact 压缩上下文，/new 新建会话，exit、quit 或 退出 结束。")
+class TerminalCommandUI:
+    def __init__(
+        self,
+        agent: AgentRunner,
+        config,
+        permission_config: PermissionConfigSet,
+        permission_service: PermissionService,
+        memory_store: MemoryStore,
+        memory_worker: MemoryWorker,
+        workspace_root: Path,
+        session_origin: str,
+        permission_mode_override: str | None = None,
+    ) -> None:
+        self.agent = agent
+        self.config = config
+        self.permission_config = permission_config
+        self.permission_service = permission_service
+        self.memory_store = memory_store
+        self.memory_worker = memory_worker
+        self.workspace_root = workspace_root
+        self._current_mode: RuntimeMode = "default"
+        self._session_origin = session_origin
+        self._last_token_usage: TokenUsage | None = None
+        self._permission_mode_override = permission_mode_override
+        self._prompt_session: PromptSession[str] | None = None
 
-    while True:
-        _print_memory_notices(agent)
-        try:
-            user_text = read_user_input("> ").strip()
-        except KeyboardInterrupt:
-            # 等待输入时按 Ctrl+C，直接退出程序
-            print("\n已退出。")
-            return 0
-        except EOFError:
-            # Ctrl+D 或输入流结束
-            print()
-            return 0
+    @property
+    def current_mode(self) -> RuntimeMode:
+        return self._current_mode
 
-        if not user_text:
-            continue
+    @property
+    def session_origin(self) -> str:
+        return self._session_origin
 
-        if user_text.lower() in EXIT_COMMANDS:
-            print("已退出。")
-            return 0
+    @property
+    def last_token_usage(self) -> TokenUsage | None:
+        return self._last_token_usage
 
-        if user_text == "/compact":
-            report = agent.compact()
-            print(f"[context] {format_compaction_report(report)}", flush=True)
-            continue
+    def attach_prompt_session(self, session: PromptSession[str]) -> None:
+        self._prompt_session = session
 
-        if user_text == "/new":
-            switch = getattr(agent, "new_session", None)
-            if switch is None:
-                print("[session] 当前 Agent 不支持新建会话。", file=sys.stderr)
-                continue
-            session_id, warnings = switch()
-            print(f"[session] 新会话 {session_id}", flush=True)
-            for warning in warnings:
-                print(f"[session] {warning}", file=sys.stderr)
-            continue
+    def bottom_toolbar(self) -> str:
+        return "[PLAN]" if self._current_mode == "plan" else "[DEFAULT]"
 
-        try:
-            # 控制“● ”只在第一段模型文本到来时打印一次
-            assistant_started = False
+    def display_message(self, text: str, *, error: bool = False) -> None:
+        print(text, file=sys.stderr if error else sys.stdout, flush=True)
 
-            # 当前请求的取消令牌，执行中按 Ctrl+C 时使用
-            cancellation = CancellationToken()
+    def clear_screen(self) -> None:
+        clear()
 
-            # 将普通输入、/plan、/do 转换成统一的 AgentRequest
-            request = parse_agent_request(user_text)
+    def send_user_message(
+        self,
+        text: str,
+        *,
+        mode_override: RuntimeMode | None = None,
+    ) -> None:
+        request = AgentRequest(text=text, mode=mode_override or self._current_mode)
+        _run_agent_turn(self.agent, request, self._remember_token_usage)
 
-            # AgentRunner 通过事件流持续返回执行进度、文本和工具结果
-            for event in agent.run(request, cancellation):
-                if event.type == "text_delta":
-                    if not assistant_started:
-                        print("● ", end="", flush=True)
-                        assistant_started = True
+    def switch_mode(self, mode: RuntimeMode) -> None:
+        self._current_mode = mode
 
-                    # 模型文本是分段返回的，因此不换行并立即刷新
-                    print(event.text, end="", flush=True)
+    def compact_context(self) -> CompactionReport:
+        report = self.agent.compact(self._current_mode)
+        if report.summary_token_usage is not None:
+            self._last_token_usage = report.summary_token_usage
+        return report
 
-                elif event.type == "progress":
-                    print(
-                        f"\n[agent] iteration "
-                        f"{event.iteration}/{event.max_iterations}",
-                        flush=True,
-                    )
+    def token_status(self) -> TokenStatus:
+        return TokenStatus(
+            last_usage=self._last_token_usage,
+            context=self.agent.context_status(self._current_mode),
+        )
 
-                elif event.type == "tool_call_started":
-                    # 只展示适合打印的工具参数，避免输出大段文件内容
-                    args_text = format_tool_arguments(event.tool_arguments)
-                    suffix = f"：{args_text}" if args_text else ""
+    def session_status(self) -> SessionStatus:
+        context = self.agent.context_status(self._current_mode)
+        journal = getattr(self.agent, "session_journal", None)
+        session_id = getattr(journal, "session_id", "unavailable")
+        return SessionStatus(
+            session_id=session_id,
+            message_count=context.message_count,
+            origin=self._session_origin,
+            context=context,
+        )
 
-                    print(
-                        f"\n[tool] {event.tool_name} 开始{suffix}",
-                        flush=True,
-                    )
+    def memory_status(self) -> MemoryStatus:
+        worker = self.memory_worker.status()
+        return MemoryStatus(
+            project_count=len(self.memory_store.list_notes("project")),
+            user_count=len(self.memory_store.list_notes("user")),
+            project_index_path=self.memory_store.root_for("project") / "index.md",
+            user_index_path=self.memory_store.root_for("user") / "index.md",
+            worker_state=worker.state,
+            pending_jobs=worker.pending_jobs,
+        )
 
-                elif event.type == "tool_result":
-                    result = event.tool_result
+    def permission_status(self) -> PermissionStatus:
+        config = self.permission_config
+        user_path = Path.home() / ".mycode" / "permissions.yaml"
+        project_path = self.workspace_root / ".mycode" / "permissions.yaml"
+        local_path = self.workspace_root / ".mycode" / "permissions.local.yaml"
+        session_count = self.permission_service.session_rule_count
+        return PermissionStatus(
+            effective_mode=config.effective_mode,
+            mode_source=self._permission_mode_source(),
+            sources=(
+                PermissionSourceStatus(
+                    "session", None, session_count > 0, session_count
+                ),
+                PermissionSourceStatus(
+                    "local", local_path, local_path.is_file(), len(config.local.rules)
+                ),
+                PermissionSourceStatus(
+                    "project", project_path, project_path.is_file(), len(config.project.rules)
+                ),
+                PermissionSourceStatus(
+                    "user", user_path, user_path.is_file(), len(config.user.rules)
+                ),
+            ),
+        )
 
-                    # result 不为空且 ok=True 时才算成功
-                    status = "成功" if result and result.ok else "失败"
-                    message = result.message if result else ""
+    def application_status(self) -> ApplicationStatus:
+        token = self.token_status()
+        return ApplicationStatus(
+            mode=self._current_mode,
+            provider=self.config.protocol,
+            model=self.config.model,
+            token=token,
+            session=SessionStatus(
+                session_id=getattr(
+                    getattr(self.agent, "session_journal", None),
+                    "session_id",
+                    "unavailable",
+                ),
+                message_count=token.context.message_count,
+                origin=self._session_origin,
+                context=token.context,
+            ),
+            memory=self.memory_status(),
+            permission=self.permission_status(),
+        )
 
-                    print(
-                        f"[tool] {event.tool_name} {status}：{message}",
-                        flush=True,
-                    )
+    def new_session(self) -> None:
+        switch = getattr(self.agent, "new_session", None)
+        if switch is None:
+            self.display_message(
+                "[session] 当前 Agent 不支持新建会话。", error=True
+            )
+            return
+        session_id, warnings = switch()
+        self._session_origin = "new"
+        self._last_token_usage = None
+        self.display_message(f"[session] 新会话 {session_id}")
+        for warning in warnings:
+            self.display_message(f"[session] {warning}", error=True)
 
-                elif event.type == "token_usage":
-                    usage_text = format_token_usage(event.token_usage)
-                    if usage_text:
-                        print(f"\n[usage] {usage_text}", flush=True)
+    def refresh_status(self) -> None:
+        session = self._prompt_session
+        if session is not None and session.app.is_running:
+            session.app.invalidate()
 
-                elif event.type == "context_status":
-                    if event.context_report is not None:
-                        print(
-                            f"\n[context] {format_compaction_report(event.context_report)}",
-                            flush=True,
-                        )
+    def _remember_token_usage(self, usage: TokenUsage | None) -> None:
+        if usage is not None:
+            self._last_token_usage = usage
 
-                elif event.type == "done":
-                    # 正常完成时不额外提示，异常停止时显示原因
-                    if event.stop_reason and event.stop_reason != "completed":
-                        print(
-                            f"\n[agent] 停止：{event.message}",
-                            flush=True,
-                        )
+    def _permission_mode_source(self) -> str:
+        if self._permission_mode_override is not None:
+            return "cli"
+        if self.permission_config.local.mode is not None:
+            return "local"
+        if self.permission_config.project.mode is not None:
+            return "project"
+        if self.permission_config.user.mode is not None:
+            return "user"
+        return "default"
 
-                elif event.type == "error":
-                    print(
-                        f"\n[agent] 错误：{event.message}",
-                        file=sys.stderr,
-                        flush=True,
-                    )
 
-            # 本轮回答结束后换行，避免下一次输入提示符粘在后面
-            print()
+def _run_interactive(
+    agent: AgentRunner,
+    *,
+    command_registry,
+    config,
+    permission_config: PermissionConfigSet,
+    permission_service: PermissionService,
+    memory_store: MemoryStore,
+    memory_worker: MemoryWorker,
+    workspace_root: Path,
+    session_origin: str,
+    permission_mode_override: str | None,
+) -> int:
+    global _ACTIVE_PROMPT_SESSION
+
+    ui = TerminalCommandUI(
+        agent,
+        config,
+        permission_config,
+        permission_service,
+        memory_store,
+        memory_worker,
+        workspace_root,
+        session_origin,
+        permission_mode_override,
+    )
+    prompt_session: PromptSession[str] = PromptSession(
+        completer=SlashCommandCompleter(command_registry),
+        key_bindings=create_slash_command_key_bindings(),
+        complete_while_typing=False,
+        complete_style=CompleteStyle.COLUMN,
+        bottom_toolbar=ui.bottom_toolbar,
+    )
+    ui.attach_prompt_session(prompt_session)
+    router = InputRouter(command_registry)
+    dispatcher = CommandDispatcher(command_registry)
+
+    print(
+        "Mycode 已启动。输入 /help 查看命令；exit、quit 或 退出 结束。"
+    )
+    previous_session = _ACTIVE_PROMPT_SESSION
+    _ACTIVE_PROMPT_SESSION = prompt_session
+    try:
+        while True:
             _print_memory_notices(agent)
+            try:
+                raw_text = read_user_input("> ")
+            except KeyboardInterrupt:
+                print("\n已退出。")
+                return 0
+            except EOFError:
+                print()
+                return 0
 
-        except KeyboardInterrupt:
-            # Agent 执行过程中按 Ctrl+C，只取消本轮任务，不退出 CLI
-            cancellation.cancel()
-            print("\n已取消。")
+            route = router.route(raw_text)
+            if route.kind == "empty":
+                continue
+            if route.kind == "exit":
+                print("已退出。")
+                return 0
+            if route.kind == "error":
+                ui.display_message(route.message, error=True)
+                continue
+            if route.kind == "plain":
+                ui.send_user_message(route.text)
+                continue
+            if route.invocation is not None:
+                dispatcher.dispatch(route.invocation, ui)
+    finally:
+        _ACTIVE_PROMPT_SESSION = previous_session
 
-        except ProviderError as exc:
-            print(f"请求错误：{exc.user_message}", file=sys.stderr)
+
+def _run_agent_turn(
+    agent: AgentRunner,
+    request: AgentRequest,
+    on_token_usage,
+) -> None:
+    assistant_started = False
+    cancellation = CancellationToken()
+    try:
+        for event in agent.run(request, cancellation):
+            if event.type == "text_delta":
+                if not assistant_started:
+                    print("● ", end="", flush=True)
+                    assistant_started = True
+                print(event.text, end="", flush=True)
+
+            elif event.type == "progress":
+                print(
+                    f"\n[agent] iteration {event.iteration}/{event.max_iterations}",
+                    flush=True,
+                )
+
+            elif event.type == "tool_call_started":
+                args_text = format_tool_arguments(event.tool_arguments)
+                suffix = f"：{args_text}" if args_text else ""
+                print(f"\n[tool] {event.tool_name} 开始{suffix}", flush=True)
+
+            elif event.type == "tool_result":
+                result = event.tool_result
+                status = "成功" if result and result.ok else "失败"
+                message = result.message if result else ""
+                print(f"[tool] {event.tool_name} {status}：{message}", flush=True)
+
+            elif event.type == "token_usage":
+                on_token_usage(event.token_usage)
+                usage_text = format_token_usage(event.token_usage)
+                if usage_text:
+                    print(f"\n[usage] {usage_text}", flush=True)
+
+            elif event.type == "context_status":
+                if event.context_report is not None:
+                    print(
+                        f"\n[context] {format_compaction_report(event.context_report)}",
+                        flush=True,
+                    )
+
+            elif event.type == "done":
+                if event.stop_reason and event.stop_reason != "completed":
+                    print(f"\n[agent] 停止：{event.message}", flush=True)
+
+            elif event.type == "error":
+                print(
+                    f"\n[agent] 错误：{event.message}",
+                    file=sys.stderr,
+                    flush=True,
+                )
+
+        print()
+        _print_memory_notices(agent)
+    except KeyboardInterrupt:
+        cancellation.cancel()
+        print("\n已取消。")
+    except ProviderError as exc:
+        print(f"请求错误：{exc.user_message}", file=sys.stderr)
 
 
 def _print_memory_notices(agent: AgentRunner) -> None:
@@ -322,24 +547,6 @@ def _time_gap_message(gap) -> str:
     hours = max(0, int(gap.total_seconds() // 3600))
     amount = f"{hours // 24} 天" if hours >= 48 else f"{hours} 小时"
     return f"距上次会话活动约 {amount}。文件、依赖、服务和需求状态可能已变化，请先核实再继续。"
-
-def parse_agent_request(user_text: str) -> AgentRequest:
-    """根据命令前缀决定 Agent 的运行模式。"""
-
-    if user_text.startswith("/plan"):
-        return AgentRequest(
-            text=user_text.removeprefix("/plan").strip(),
-            mode="plan",
-        )
-
-    if user_text.startswith("/do"):
-        return AgentRequest(
-            text=user_text.removeprefix("/do").strip(),
-            mode="do",
-        )
-
-    return AgentRequest(text=user_text, mode="default")
-
 
 def format_token_usage(usage: TokenUsage | None) -> str:
     """将 TokenUsage 转换为终端可读文本。"""

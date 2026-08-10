@@ -1,6 +1,6 @@
 from .interfaces import CommandExecutionError, CommandRegistrationError, CommandUI
 from .builtins import REVIEW_PROMPT, create_default_command_registry
-from .completion import SlashCommandCompleter
+from .completion import SlashCommandCompleter, create_slash_command_key_bindings
 from .models import (
     ApplicationStatus,
     CommandInvocation,
@@ -38,4 +38,5 @@ __all__ = [
     "SessionStatus",
     "TokenStatus",
     "create_default_command_registry",
+    "create_slash_command_key_bindings",
 ]
