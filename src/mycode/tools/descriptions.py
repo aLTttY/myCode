@@ -9,6 +9,10 @@ DEDICATED_RULES = {
     "read_file": "Use this tool first when you need to inspect a known workspace file.",
     "find_files": "Use this tool first when you need to locate files by name or path pattern.",
     "search_code": "Use this tool first when you need to find code or text occurrences in the workspace.",
+    "read_git_changes": (
+        "Use this no-argument read-only tool to inspect current staged, unstaged, "
+        "and untracked Git changes."
+    ),
     "edit_file": "Use this tool to modify an existing file after reading or searching to confirm its current content.",
     "write_file": "Use this tool to create or fully replace a workspace file only when complete content is available.",
     "run_command": "Use this tool only when a shell command is the appropriate way to inspect or verify the task.",
@@ -25,7 +29,15 @@ def reinforce_tool_spec(spec: ToolSpec) -> ToolSpec:
         additions.append(dedicated_rule)
     if spec.name == "edit_file":
         additions.append(EDIT_FIRST_READ_RULE)
-    if spec.name in {"read_file", "write_file", "edit_file", "run_command", "find_files", "search_code"}:
+    if spec.name in {
+        "read_file",
+        "write_file",
+        "edit_file",
+        "run_command",
+        "find_files",
+        "search_code",
+        "read_git_changes",
+    }:
         additions.append(WORKSPACE_RULE)
     if not additions:
         return spec

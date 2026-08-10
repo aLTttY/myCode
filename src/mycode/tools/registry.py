@@ -5,6 +5,7 @@ import re
 from mycode.tools.base import Tool
 from mycode.tools.command import RunCommandTool
 from mycode.tools.files import EditFileTool, ReadFileTool, WriteFileTool
+from mycode.tools.git import ReadGitChangesTool
 from mycode.tools.search import FindFilesTool, SearchCodeTool
 from mycode.types import ToolError, ToolSpec
 
@@ -61,4 +62,5 @@ def create_default_registry() -> ToolRegistry:
     registry.register(RunCommandTool())
     registry.register(FindFilesTool())
     registry.register(SearchCodeTool())
+    registry.register(ReadGitChangesTool())
     return registry

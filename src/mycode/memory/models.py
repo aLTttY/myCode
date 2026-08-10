@@ -9,6 +9,7 @@ from typing import Literal
 MemoryCategory = Literal["user_preference", "correction_feedback", "project_knowledge", "reference"]
 MemoryScope = Literal["user", "project"]
 MemoryAction = Literal["ignore", "create", "update"]
+MemoryWorkerState = Literal["idle", "busy"]
 
 
 @dataclass(frozen=True)
@@ -68,6 +69,12 @@ class TurnSnapshot:
 class MemoryNotice:
     code: str
     message: str
+
+
+@dataclass(frozen=True)
+class MemoryWorkerStatus:
+    state: MemoryWorkerState
+    pending_jobs: int
 
 
 @dataclass

@@ -175,7 +175,12 @@ def test_agent_runner_plan_mode_uses_readonly_tools(tmp_path: Path) -> None:
 
     events = list(runner(provider, tmp_path).run(AgentRequest("inspect", mode="plan")))
 
-    assert {tool.name for tool in provider.calls[0].tools} == {"read_file", "find_files", "search_code"}
+    assert {tool.name for tool in provider.calls[0].tools} == {
+        "read_file",
+        "find_files",
+        "search_code",
+        "read_git_changes",
+    }
     assert provider.calls[0].messages[-1].content == "inspect"
     assert "Plan Mode" in provider.calls[0].dynamic_system_messages[1].render()
     assert any(event.type == "text_delta" and event.text == "plan" for event in events)
@@ -296,5 +301,7 @@ def test_agent_runner_compact_can_override_last_request_mode(tmp_path: Path) -> 
 
     agent.compact("plan")
 
-    assert captured_tools == [{"read_file", "find_files", "search_code"}]
+    assert captured_tools == [
+        {"read_file", "find_files", "search_code", "read_git_changes"}
+    ]
     assert provider.calls == []

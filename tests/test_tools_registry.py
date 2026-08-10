@@ -4,7 +4,7 @@ from mycode.tools.registry import ToolRegistry, create_default_registry, is_vali
 from mycode.types import ToolError, ToolSpec
 
 
-def test_default_registry_registers_six_tools() -> None:
+def test_default_registry_registers_seven_tools() -> None:
     registry = create_default_registry()
 
     assert {spec.name for spec in registry.tool_specs()} == {
@@ -14,6 +14,7 @@ def test_default_registry_registers_six_tools() -> None:
         "run_command",
         "find_files",
         "search_code",
+        "read_git_changes",
     }
 
 

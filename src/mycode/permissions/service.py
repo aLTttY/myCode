@@ -125,3 +125,8 @@ class PermissionService:
                 return PermissionDecision(True, "user_allow_session", "用户允许本会话内的相同调用。", request.target)
 
             return PermissionDecision(False, "invalid_approval", "审批结果无效，已安全拒绝。", request.target)
+
+    @property
+    def session_rule_count(self) -> int:
+        with self._lock:
+            return len(self._session_rules)

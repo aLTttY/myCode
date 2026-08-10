@@ -5,7 +5,7 @@ import secrets
 import threading
 import time
 
-from .models import MemoryJob, MemoryNotice, TurnSnapshot
+from .models import MemoryJob, MemoryNotice, MemoryWorkerStatus, TurnSnapshot
 from .service import MemoryService
 
 
@@ -46,6 +46,14 @@ class MemoryWorker:
                 notices.append(self._notices.get_nowait())
             except queue.Empty:
                 return tuple(notices)
+
+    def status(self) -> MemoryWorkerStatus:
+        with self._condition:
+            pending_jobs = len(self._jobs)
+        return MemoryWorkerStatus(
+            state="busy" if pending_jobs else "idle",
+            pending_jobs=pending_jobs,
+        )
 
     def _run(self) -> None:
         while True:

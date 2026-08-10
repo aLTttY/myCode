@@ -31,3 +31,17 @@ def test_reinforce_tool_specs_returns_tuple() -> None:
 
     assert isinstance(specs, tuple)
     assert specs[0].description == "Unknown."
+
+
+def test_reinforce_git_changes_mentions_readonly_scope() -> None:
+    spec = reinforce_tool_spec(
+        ToolSpec(
+            name="read_git_changes",
+            description="Read Git changes.",
+            parameters={"type": "object"},
+        )
+    )
+
+    assert "no-argument read-only" in spec.description
+    assert "staged" in spec.description
+    assert "workspace" in spec.description

@@ -5,7 +5,9 @@ from typing import Literal
 
 ToolSafety = Literal["read", "side_effect"]
 
-READ_TOOLS = frozenset({"read_file", "find_files", "search_code"})
+READ_TOOLS = frozenset(
+    {"read_file", "find_files", "search_code", "read_git_changes"}
+)
 
 
 def is_read_tool(name: str) -> bool:

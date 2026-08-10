@@ -9,6 +9,7 @@ def test_classify_tools() -> None:
     assert classify_tool("read_file") == "read"
     assert classify_tool("find_files") == "read"
     assert classify_tool("search_code") == "read"
+    assert classify_tool("read_git_changes") == "read"
     assert classify_tool("write_file") == "side_effect"
     assert classify_tool("edit_file") == "side_effect"
     assert classify_tool("run_command") == "side_effect"
@@ -19,7 +20,12 @@ def test_classify_tools() -> None:
 def test_create_readonly_registry_contains_only_read_tools() -> None:
     registry = create_readonly_registry(create_default_registry())
 
-    assert {spec.name for spec in registry.tool_specs()} == {"read_file", "find_files", "search_code"}
+    assert {spec.name for spec in registry.tool_specs()} == {
+        "read_file",
+        "find_files",
+        "search_code",
+        "read_git_changes",
+    }
 
 
 def test_batcher_groups_adjacent_tool_safety() -> None:

@@ -2,6 +2,7 @@ __all__ = [
     "EditFileTool",
     "FindFilesTool",
     "ReadFileTool",
+    "ReadGitChangesTool",
     "RunCommandTool",
     "SearchCodeTool",
     "ToolExecutor",
@@ -16,6 +17,10 @@ def __getattr__(name: str):
         from .command import RunCommandTool
 
         return RunCommandTool
+    if name == "ReadGitChangesTool":
+        from .git import ReadGitChangesTool
+
+        return ReadGitChangesTool
     if name == "ToolExecutor":
         from .executor import ToolExecutor
 

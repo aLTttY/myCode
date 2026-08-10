@@ -103,10 +103,12 @@ def test_session_allow_lasts_only_for_service_instance(tmp_path: Path) -> None:
     assert service.authorize(tool_call, ToolContext(tmp_path)).allowed
     assert service.authorize(tool_call, ToolContext(tmp_path)).reason_code == "rule_allow"
     assert len(approval.calls) == 1
+    assert service.session_rule_count == 1
 
     fresh_approval = FakeApproval(["deny"])
     fresh = PermissionService(config(), fresh_approval)
     assert not fresh.authorize(tool_call, ToolContext(tmp_path)).allowed
+    assert fresh.session_rule_count == 0
 
 
 def test_session_allow_prevents_second_write_approval(tmp_path: Path) -> None:
@@ -182,6 +184,7 @@ def test_mcp_session_allow_covers_later_arguments(tmp_path: Path) -> None:
     assert first.reason_code == "user_allow_session"
     assert second.reason_code == "rule_allow"
     assert len(approval.calls) == 1
+    assert service.session_rule_count == 1
 
 
 def test_unknown_non_mcp_tool_remains_rejected(tmp_path: Path) -> None:
