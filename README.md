@@ -134,11 +134,64 @@ PYTHONPATH=src .venv/bin/python -m mycode --permission-mode strict
 | `/memory` | `/mem` | 显示两级记忆数量、索引路径和后台状态 |
 | `/permission` | `/perm` | 显示生效权限模式、来源和各层规则数量 |
 | `/status` | `/st` | 汇总模式、模型、权限、会话、Token、上下文和记忆状态 |
-| `/review` | `/rev` | 以单次只读 PLAN 请求审查当前未提交变更 |
+| `/commit [要求]` | 无 | 加载内置共享 Skill，检查、验证并按权限创建 Git 提交 |
+| `/review [范围]` | `/rev` | 在独立、只读、无历史上下文中运行内置审查 Skill |
+| `/test [要求]` | 无 | 加载内置共享 Skill，识别并运行相关测试 |
 
-`/help` 总览只列以上十个命令。兼容命令 `/new` 仍可完成当前会话收尾并创建空白会话，但不会出现在总览或补全中；可用 `/help new` 显式查看。`/new` 保留当前模式并清空最近 Token 状态。
+`/help` 总览会同时列出固定命令和当前生效的 Skill 命令。兼容命令 `/new` 仍可完成当前会话收尾并创建空白会话，但不会出现在总览或补全中；可用 `/help new` 显式查看。`/new` 保留当前模式、清空最近 Token 状态，并清除当前会话已激活的 Skill。
 
-除 `/review` 和 `/compact` 必要的摘要请求外，斜杠命令都不会进入 Agent Loop。`/compact` 在无需摘要时完全本地执行，需要摘要时只调用摘要 Provider。`/review` 发送固定审查提示，强制使用只读工具且不改变持久模式；它只报告缺陷、回归、安全问题和测试缺口，不修改文件。
+除 Skill 命令和 `/compact` 必要的摘要请求外，固定斜杠命令都不会进入 Agent Loop。`/compact` 在无需摘要时完全本地执行，需要摘要时只调用摘要 Provider。`/review` 不再是固定提示命令，而是内置的独立 Skill；它只报告缺陷、回归、安全问题和测试缺口，不修改文件。
+
+## Skills
+
+Skill 把可复用的 Agent 操作保存为 Markdown SOP。Mycode 按“项目 > 用户 > 内置”的优先级加载三个目录中的同名定义：
+
+```text
+项目级：<workspace>/.mycode/skills/
+用户级：~/.mycode/skills/
+内置：mycode.skills.builtins 包资源
+```
+
+最简单的 Skill 是目录根部的单个 `.md` 文件。文件使用严格 YAML frontmatter，正文是激活后发给模型的 SOP：
+
+```markdown
+---
+name: explain-change
+description: 解释当前改动及其风险
+allowed_tools:
+  - read_git_changes
+  - read_file
+  - search_code
+mode: shared
+---
+先读取当前改动，再按风险顺序解释。附加要求见当前 user 消息：{{input}}
+```
+
+必填字段是 `name`、`description`、`allowed_tools` 和 `mode`。`mode` 只能是 `shared` 或 `isolated`。独立模式还必须提供非负整数 `history`，表示复制最近多少个完整主对话轮次；它可以用 `model` 指定同一 Provider 下的另一模型。共享模式禁止 `history` 和 `model`，未知字段会使该定义失效。`{{input}}` 只引用斜杠命令或当前请求传入的 user 角色数据，不会把参数拼进 system/SOP 文本。
+
+Mycode 使用两阶段加载。启动和每轮重建时，模型只看到尚未激活 Skill 的名字与一句说明；需要时模型调用系统工具 `load_skill`，下一轮才会看到完整 SOP 和专属工具。`load_skill` 始终可用且无需业务权限，但不会代替任何业务工具执行读写、命令或网络操作。
+
+共享模式在当前主对话中运行，消息和工具结果保留在主历史；多个共享 Skill 可同时激活，其 `allowed_tools` 取并集。独立模式创建一次性 Agent，只带指定数量的完整历史，结束时把最终 assistant 文本作为摘要回流主历史，中间文本和工具轨迹不会进入主会话。独立 Agent 可以临时加载共享 Skill，但不能嵌套另一个独立 Skill。Plan Mode 会在白名单基础上继续移除有副作用工具；白名单只控制可见性，不授予权限。
+
+目录型 Skill 是一个能力包，入口固定为 `<skill-dir>/SKILL.md`。专属工具放在 `tools/` 下，每个工具由同名 YAML schema 和 Python 实现脚本组成。例如 `tools/lookup.yaml`：
+
+```yaml
+name: lookup
+description: 查询项目内的受控数据
+parameters:
+  type: object
+  properties:
+    key: {type: string}
+  required: [key]
+  additionalProperties: false
+script: lookup.py
+```
+
+它会以 `<skill-name>__lookup` 暴露。Mycode 用当前 Python 解释器直接启动脚本，不经过 shell；stdin 是 `{"arguments": {...}, "context": {"workspace_root": "..."}}`，stdout 必须只包含 `{"ok": true|false, "message": "...", "data": {...}}`。脚本使用最小环境、受限工作目录、有界输出和超时，并始终按有副作用工具走目标为 `call` 的权限审批。
+
+每个生效 Skill 会自动注册为 `/<name> [input]`，并出现在 `/help` 和 Tab 补全中。Mycode 在处理下一条输入前检查文件变化；新增、修改、删除、优先级覆盖和专属脚本更新无需重启。单个非法文件会被隔离并打印诊断，不阻断其他合法 Skill 更新。`/clear` 只清屏，不清除激活状态；`/new` 清除全部激活状态。内置样板为共享 `/commit`、独立只读 `/review`（别名 `/rev`）和共享 `/test`，都可以被项目或用户级同名定义覆盖。
+
+本阶段不包含 Skill 市场分发、远程安装或版本管理。
 
 ## 项目指令与长期记忆
 

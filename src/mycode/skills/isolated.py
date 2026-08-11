@@ -59,32 +59,33 @@ class IsolatedSkillRunner:
         if cancellation.is_cancelled():
             return IsolatedSkillResult("cancelled", "独立 Skill 已取消。")
 
-        snapshot = self.snapshot_supplier()
-        runtime = SkillRuntime.for_isolated(snapshot, definition)
-        provider_config = (
-            replace(self.app_config, model=definition.model)
-            if definition.model is not None
-            else self.app_config
-        )
-        provider = self.provider_factory(provider_config)
-        registry = self.base_registry.subset(
-            name for name in self.base_registry.names() if name not in SYSTEM_TOOLS
-        )
-        child = AgentRunner(
-            provider,
-            registry,
-            self.tool_context,
-            config=self.agent_config,
-            permission_service=self.permission_service,
-            context_config=self.app_config.context,
-            instruction_bundle=self.instruction_bundle,
-            restored_messages=tuple(history),
-            skill_runtime=runtime,
-            isolated_skill_executor=self,
-        )
         done_reason: str | None = None
         usage: TokenUsage | None = None
+        child: AgentRunner | None = None
         try:
+            snapshot = self.snapshot_supplier()
+            runtime = SkillRuntime.for_isolated(snapshot, definition)
+            provider_config = (
+                replace(self.app_config, model=definition.model)
+                if definition.model is not None
+                else self.app_config
+            )
+            provider = self.provider_factory(provider_config)
+            registry = self.base_registry.subset(
+                name for name in self.base_registry.names() if name not in SYSTEM_TOOLS
+            )
+            child = AgentRunner(
+                provider,
+                registry,
+                self.tool_context,
+                config=self.agent_config,
+                permission_service=self.permission_service,
+                context_config=self.app_config.context,
+                instruction_bundle=self.instruction_bundle,
+                restored_messages=tuple(history),
+                skill_runtime=runtime,
+                isolated_skill_executor=self,
+            )
             for event in child.run(
                 AgentRequest(
                     text=_isolated_user_message(definition, invocation.input_text),
@@ -114,7 +115,11 @@ class IsolatedSkillRunner:
                 usage,
             )
         finally:
-            child.close()
+            if child is not None:
+                try:
+                    child.close()
+                except Exception:
+                    pass
 
 
 def _isolated_user_message(definition: SkillDefinition, input_text: str) -> str:

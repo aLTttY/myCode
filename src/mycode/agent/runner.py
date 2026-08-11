@@ -92,6 +92,17 @@ class AgentRunner:
         self._current_request = request
         self._current_cancellation = cancellation
         try:
+            yield from self._run_loop(request, cancellation)
+        finally:
+            self._current_request = None
+            self._current_cancellation = None
+
+    def _run_loop(
+        self,
+        request: AgentRequest,
+        cancellation: CancellationToken,
+    ) -> Iterator[AgentEvent]:
+        try:
             self._append_message(Message(role="user", content=request.text))
         except SessionError as exc:
             yield AgentEvent(type="error", stop_reason="session_error", message=str(exc))
@@ -262,6 +273,7 @@ class AgentRunner:
             yield AgentEvent(type="error", stop_reason="session_error", message=str(exc))
             yield done_event("session_error", str(exc))
             return
+        self._submit_memory(user_message, result.summary, ())
         if result.summary:
             yield AgentEvent(type="text_delta", text=result.summary)
         if result.status == "cancelled":
@@ -415,7 +427,7 @@ class AgentRunner:
                 return ToolResult(
                     ok=False,
                     message="独立 Skill 运行期间不能嵌套执行另一个独立 Skill。",
-                    data={"skill": name, "reason": "nested_isolated_skill"},
+                    data={"skill": name, "reason": "nested_isolated_not_supported"},
                 )
             request = self._current_request
             cancellation = self._current_cancellation or CancellationToken()

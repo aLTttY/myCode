@@ -159,6 +159,28 @@ def test_isolated_failure_and_cancellation_have_deterministic_summary(tmp_path: 
     assert provider.calls == []
 
 
+def test_isolated_provider_creation_failure_returns_safe_summary(tmp_path: Path) -> None:
+    root = definition("review", model="unavailable")
+
+    def fail_provider(config: AppConfig):
+        raise RuntimeError("provider secret detail")
+
+    isolated = IsolatedSkillRunner(
+        app_config=config(),
+        base_registry=create_default_registry(),
+        tool_context=ToolContext(workspace_root=tmp_path),
+        permission_service=PermissionService.with_mode("allow"),
+        snapshot_supplier=lambda: snapshot(root),
+        provider_factory=fail_provider,
+    )
+
+    result = isolated.run(invocation("review"), root, (), CancellationToken())
+
+    assert result.status == "failed"
+    assert result.summary == "独立 Skill `review` 执行失败（RuntimeError）。"
+    assert "secret" not in result.summary
+
+
 def test_isolated_can_temporarily_activate_shared_skill(tmp_path: Path) -> None:
     root = definition("review")
     shared = definition("helper", mode="shared", history=None, tools=("find_files",))
@@ -189,7 +211,7 @@ def test_isolated_rejects_nested_isolated_skill(tmp_path: Path) -> None:
 
     assert result.status == "completed"
     tool_message = next(message for message in provider.calls[1].messages if message.role == "tool")
-    assert "nested_isolated_skill" in tool_message.content
+    assert "nested_isolated_not_supported" in tool_message.content
 
 
 def test_isolated_does_not_reuse_temporary_activation_across_calls(tmp_path: Path) -> None:
