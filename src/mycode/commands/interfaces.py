@@ -43,6 +43,9 @@ class CommandUI(Protocol):
     ) -> None:
         ...
 
+    def invoke_skill(self, name: str, input_text: str) -> None:
+        ...
+
     def switch_mode(self, mode: RuntimeMode) -> None:
         ...
 

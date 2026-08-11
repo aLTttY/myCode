@@ -126,3 +126,17 @@ def test_command_handler_is_optional_metadata() -> None:
     registry.register(spec("help"))
 
     assert registry.resolve("help").handler is None  # type: ignore[union-attr]
+
+
+def test_replace_dynamic_is_atomic_and_preserves_fixed_commands() -> None:
+    registry = CommandRegistry()
+    registry.register(spec("help"))
+    registry.replace_dynamic((spec("commit"), spec("review", aliases=("rev",))))
+
+    assert [item.name for item in registry.commands()] == ["help", "commit", "review"]
+    assert registry.resolve("rev").name == "review"  # type: ignore[union-attr]
+
+    with pytest.raises(CommandRegistrationError, match="冲突"):
+        registry.replace_dynamic((spec("help"),))
+
+    assert [item.name for item in registry.commands()] == ["help", "commit", "review"]

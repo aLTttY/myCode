@@ -1,5 +1,5 @@
 from .interfaces import CommandExecutionError, CommandRegistrationError, CommandUI
-from .builtins import REVIEW_PROMPT, create_default_command_registry
+from .builtins import create_default_command_registry
 from .completion import SlashCommandCompleter, create_slash_command_key_bindings
 from .models import (
     ApplicationStatus,
@@ -27,7 +27,6 @@ __all__ = [
     "CommandSpec",
     "CommandType",
     "CommandUI",
-    "REVIEW_PROMPT",
     "InputRoute",
     "InputRouter",
     "MemoryStatus",

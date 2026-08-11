@@ -19,6 +19,7 @@ SessionOrigin = Literal["new", "restored"]
 MemoryWorkerState = Literal["idle", "busy"]
 PermissionMode = Literal["strict", "default", "allow"]
 PermissionSource = Literal["session", "local", "project", "user"]
+CommandOrigin = Literal["builtin", "skill"]
 
 
 CommandHandler = Callable[
@@ -37,6 +38,11 @@ class CommandSpec:
     argument_hint: str = ""
     hidden: bool = False
     handler: CommandHandler | None = None
+    origin: CommandOrigin = "builtin"
+    skill_source: str = ""
+    skill_mode: str = ""
+    skill_history: int | None = None
+    skill_model: str = ""
 
 
 @dataclass(frozen=True)

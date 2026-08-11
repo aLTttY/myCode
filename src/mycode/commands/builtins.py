@@ -16,9 +16,6 @@ from .models import (
 from .registry import CommandRegistry
 
 
-REVIEW_PROMPT = """审查当前工作区的未提交变更。你必须先调用 read_git_changes 获取 staged、unstaged 和 untracked 状态，再按需使用只读文件与搜索工具核对上下文。只报告可操作的缺陷、回归、安全问题和测试缺口，按严重程度排序，并给出准确的文件定位。不要修改任何文件，也不要调用写入或执行类工具。如果没有发现问题，请明确说明。"""
-
-
 def create_default_command_registry() -> CommandRegistry:
     registry = CommandRegistry()
     for command in _builtin_commands():
@@ -102,14 +99,6 @@ def _builtin_commands() -> tuple[CommandSpec, ...]:
             handler=_handle_status,
         ),
         CommandSpec(
-            name="review",
-            aliases=("rev",),
-            description="只读审查当前未提交变更",
-            usage="/review",
-            command_type="prompt",
-            handler=_handle_review,
-        ),
-        CommandSpec(
             name="new",
             aliases=(),
             description="关闭当前会话并创建新会话",
@@ -157,18 +146,24 @@ def _handle_help(
         )
     aliases = ", ".join(f"/{alias}" for alias in target.aliases) or "无"
     argument_hint = target.argument_hint or "无"
-    ui.display_message(
-        "\n".join(
+    rows = [
+        f"命令：/{target.name}",
+        f"别名：{aliases}",
+        f"类型：{target.command_type}",
+        f"描述：{target.description}",
+        f"用法：{target.usage}",
+        f"参数提示：{argument_hint}",
+    ]
+    if target.origin == "skill":
+        rows.extend(
             (
-                f"命令：/{target.name}",
-                f"别名：{aliases}",
-                f"类型：{target.command_type}",
-                f"描述：{target.description}",
-                f"用法：{target.usage}",
-                f"参数提示：{argument_hint}",
+                f"Skill 来源：{target.skill_source}",
+                f"Skill 模式：{target.skill_mode}",
+                f"历史轮数：{target.skill_history if target.skill_history is not None else '共享上下文'}",
+                f"指定模型：{target.skill_model or '当前模型'}",
             )
         )
-    )
+    ui.display_message("\n".join(rows))
 
 
 def _handle_compact(
@@ -245,15 +240,6 @@ def _handle_status(
 ) -> None:
     _require_no_arguments(invocation)
     ui.display_message(format_application_status(ui.application_status()))
-
-
-def _handle_review(
-    invocation: CommandInvocation,
-    registry: CommandRegistry,
-    ui: CommandUI,
-) -> None:
-    _require_no_arguments(invocation)
-    ui.send_user_message(REVIEW_PROMPT, mode_override="plan")
 
 
 def _handle_new(

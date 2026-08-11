@@ -5,7 +5,7 @@ from pathlib import Path
 
 import pytest
 
-from mycode.commands.builtins import REVIEW_PROMPT, create_default_command_registry
+from mycode.commands.builtins import create_default_command_registry
 from mycode.commands.models import (
     ApplicationStatus,
     MemoryStatus,
@@ -28,6 +28,7 @@ class FakeCommandUI:
     messages: list[tuple[str, bool]] = field(default_factory=list)
     sent: list[tuple[str, str | None]] = field(default_factory=list)
     calls: list[str] = field(default_factory=list)
+    skill_calls: list[tuple[str, str]] = field(default_factory=list)
     report: CompactionReport = field(
         default_factory=lambda: CompactionReport(
             status="success",
@@ -52,6 +53,9 @@ class FakeCommandUI:
 
     def send_user_message(self, text: str, *, mode_override=None) -> None:
         self.sent.append((text, mode_override))
+
+    def invoke_skill(self, name: str, input_text: str) -> None:
+        self.skill_calls.append((name, input_text))
 
     def switch_mode(self, mode) -> None:
         self.calls.append(f"mode:{mode}")
@@ -141,13 +145,13 @@ def test_builtin_catalog_has_expected_order_metadata_and_types() -> None:
 
     assert [command.name for command in commands] == [
         "help", "compact", "clear", "plan", "do", "session", "memory",
-        "permission", "status", "review", "new",
+        "permission", "status", "new",
     ]
-    assert len(registry.commands()) == 10
+    assert len(registry.commands()) == 9
     assert commands[-1].hidden is True
     assert all(command.description and command.usage for command in commands)
     assert all(command.handler is not None for command in commands)
-    assert {command.command_type for command in commands} == {"local", "ui", "prompt"}
+    assert {command.command_type for command in commands} == {"local", "ui"}
 
 
 @pytest.mark.parametrize(
@@ -162,7 +166,6 @@ def test_builtin_catalog_has_expected_order_metadata_and_types() -> None:
         ("memory", ("mem",)),
         ("permission", ("perm",)),
         ("status", ("st",)),
-        ("review", ("rev",)),
     ],
 )
 def test_builtin_names_and_aliases_resolve_case_insensitively(
@@ -183,8 +186,8 @@ def test_help_overview_lists_only_visible_commands() -> None:
 
     assert sum(f"/{name}" in text for name in (
         "help", "compact", "clear", "plan", "do", "session", "memory",
-        "permission", "status", "review",
-    )) == 10
+        "permission", "status",
+    )) == 9
     assert "/new" not in text
 
 
@@ -204,7 +207,7 @@ def test_help_detail_resolves_alias_and_hidden_command() -> None:
 @pytest.mark.parametrize(
     "text", ["/compact now", "/clear now", "/plan now", "/do now",
              "/session now", "/memory now", "/permission now", "/status now",
-             "/review now", "/new now"]
+             "/new now"]
 )
 def test_no_argument_commands_reject_arguments_without_side_effects(text: str) -> None:
     ui = _execute(text)
@@ -299,17 +302,6 @@ def test_status_marks_missing_tokens_unavailable_and_aggregates() -> None:
     assert "[usage] unavailable" in text
     assert "tokens=120/1000" in text
     assert "worker=busy pending=2" in text
-
-
-def test_review_sends_fixed_prompt_in_one_shot_plan_mode() -> None:
-    ui = FakeCommandUI(mode="default")
-
-    _execute("/review", ui)
-
-    assert ui.sent == [(REVIEW_PROMPT, "plan")]
-    assert "read_git_changes" in ui.sent[0][0]
-    assert "/review" not in ui.sent[0][0]
-    assert ui.mode == "default"
 
 
 def test_hidden_new_is_local_and_preserves_mode() -> None:
