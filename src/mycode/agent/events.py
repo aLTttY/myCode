@@ -16,6 +16,7 @@ AgentStopReason = Literal[
     "tool_parse_error",
     "context_overflow",
     "session_error",
+    "skill_failed",
 ]
 
 

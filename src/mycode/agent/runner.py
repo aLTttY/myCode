@@ -21,6 +21,14 @@ from mycode.prompts.modes import DynamicInstruction, PromptMode
 from mycode.prompts.modules import PromptOptions
 from mycode.providers.base import ChatRequest, LLMProvider
 from mycode.sessions import SessionError, SessionJournal
+from mycode.skills.models import (
+    IsolatedSkillExecutor,
+    SkillDefinition,
+    SkillInvocation,
+    SkillValidationError,
+)
+from mycode.skills.runtime import SkillRuntime
+from mycode.skills.tools import LoadSkillTool
 from mycode.tools.descriptions import reinforce_tool_specs
 from mycode.types import ContextConfig, Message, ProviderError, ToolCall, ToolContext, ToolExecutionResult, ToolResult
 from mycode.tools.registry import ToolRegistry
@@ -41,6 +49,8 @@ class AgentRunner:
         memory_worker: MemoryWorker | None = None,
         restored_messages: Sequence[Message] = (),
         time_gap_reminder: str = "",
+        skill_runtime: SkillRuntime | None = None,
+        isolated_skill_executor: IsolatedSkillExecutor | None = None,
     ) -> None:
         self.provider = provider
         self.full_registry = full_registry
@@ -61,6 +71,12 @@ class AgentRunner:
         self.memory_worker = memory_worker
         self._time_gap_reminder = time_gap_reminder
         self._last_request: AgentRequest | None = None
+        self.skill_runtime = skill_runtime
+        self.isolated_skill_executor = isolated_skill_executor
+        self._current_request: AgentRequest | None = None
+        self._current_cancellation: CancellationToken | None = None
+        if self.skill_runtime is not None and not self.full_registry.contains("load_skill"):
+            self.full_registry.register(LoadSkillTool(self._load_skill_from_agent))
 
     @property
     def messages(self):
@@ -72,8 +88,9 @@ class AgentRunner:
         cancellation: CancellationToken | None = None,
     ) -> Iterator[AgentEvent]:
         cancellation = cancellation or CancellationToken()
-        registry = self._registry_for_request(request)
         self._last_request = request
+        self._current_request = request
+        self._current_cancellation = cancellation
         try:
             self._append_message(Message(role="user", content=request.text))
         except SessionError as exc:
@@ -91,6 +108,7 @@ class AgentRunner:
 
             yield progress_event(iteration, self.config.max_iterations, f"iteration {iteration}/{self.config.max_iterations}")
             try:
+                registry = self._registry_for_request(request)
                 template = self._chat_request_template(request, registry, iteration)
                 prepared = self.context_manager.prepare_request(template)
                 if prepared.report.status != "not_needed":
@@ -201,9 +219,61 @@ class AgentRunner:
         return collected
 
     def _registry_for_request(self, request: AgentRequest) -> ToolRegistry:
+        if self.skill_runtime is not None:
+            return self.skill_runtime.project_registry(self.full_registry, request.mode)
         if request.mode == "plan":
             return create_readonly_registry(self.full_registry)
         return self.full_registry
+
+    def invoke_skill(
+        self,
+        name: str,
+        input_text: str,
+        *,
+        mode: PromptMode = "default",
+        cancellation: CancellationToken | None = None,
+    ) -> Iterator[AgentEvent]:
+        if self.skill_runtime is None:
+            yield AgentEvent(type="error", stop_reason="skill_failed", message="Skill 运行时未启用。")
+            yield done_event("skill_failed", "Skill 运行时未启用。")
+            return
+        cancellation = cancellation or CancellationToken()
+        try:
+            definition = self.skill_runtime.definition(name)
+        except SkillValidationError as exc:
+            yield AgentEvent(type="error", stop_reason="skill_failed", message=exc.message)
+            yield done_event("skill_failed", exc.message)
+            return
+
+        user_message = _skill_user_message(definition, input_text)
+        if definition.mode == "shared":
+            self.skill_runtime.activate_shared(name)
+            yield from self.run(AgentRequest(text=user_message, mode=mode), cancellation)
+            return
+
+        result = self._run_isolated_skill(
+            SkillInvocation(name=name, input_text=input_text, origin="slash", runtime_mode=mode),
+            definition,
+            cancellation,
+        )
+        try:
+            self.append_external_turn(user_message, result.summary)
+        except SessionError as exc:
+            yield AgentEvent(type="error", stop_reason="session_error", message=str(exc))
+            yield done_event("session_error", str(exc))
+            return
+        if result.summary:
+            yield AgentEvent(type="text_delta", text=result.summary)
+        if result.status == "cancelled":
+            yield done_event("cancelled", result.summary or "用户已取消。")
+        elif result.status == "failed":
+            yield done_event("skill_failed", result.summary or "Skill 执行失败。")
+        else:
+            yield done_event("completed", "Skill 执行完成。")
+
+    def append_external_turn(self, user_text: str, assistant_text: str) -> None:
+        self._append_message(Message(role="user", content=user_text))
+        self._append_message(Message(role="assistant", content=assistant_text))
 
     def compact(self, mode: PromptMode | None = None) -> CompactionReport:
         request = self._last_request or AgentRequest(text="", mode="default")
@@ -249,6 +319,8 @@ class AgentRunner:
             warnings.append(warning)
         self.session_journal = SessionJournal(self.tool_context.workspace_root)
         self.context_manager = ContextManager(self.context_config, self.provider, self.tool_context.workspace_root)
+        if self.skill_runtime is not None:
+            self.skill_runtime.reset()
         self._last_request = None
         self._time_gap_reminder = ""
         return self.session_journal.session_id, tuple(warnings)
@@ -270,6 +342,8 @@ class AgentRunner:
             environment=environment,
             options=PromptOptions(
                 custom_instructions=self.instruction_bundle.content,
+                skill_catalog=self.skill_runtime.catalog_prompt() if self.skill_runtime is not None else "",
+                active_skills=self.skill_runtime.active_prompt() if self.skill_runtime is not None else (),
                 long_term_memory=self._memory_prompt(),
             ),
         )
@@ -325,6 +399,67 @@ class AgentRunner:
             )
         )
 
+    def _load_skill_from_agent(self, name: str) -> ToolResult:
+        if self.skill_runtime is None:
+            return ToolResult(ok=False, message="Skill 运行时未启用。", data={"reason": "runtime_unavailable"})
+        try:
+            definition = self.skill_runtime.definition(name)
+            if definition.mode == "shared":
+                activation = self.skill_runtime.activate_shared(name)
+                return ToolResult(
+                    ok=True,
+                    message=f"Skill `{name}` 已加载。",
+                    data={"skill": name, "mode": "shared", "newly_activated": activation.newly_activated},
+                )
+            if self.skill_runtime.is_isolated:
+                return ToolResult(
+                    ok=False,
+                    message="独立 Skill 运行期间不能嵌套执行另一个独立 Skill。",
+                    data={"skill": name, "reason": "nested_isolated_skill"},
+                )
+            request = self._current_request
+            cancellation = self._current_cancellation or CancellationToken()
+            if request is None:
+                return ToolResult(
+                    ok=False,
+                    message="当前没有可用于执行 Skill 的用户请求。",
+                    data={"skill": name, "reason": "missing_request"},
+                )
+            result = self._run_isolated_skill(
+                SkillInvocation(
+                    name=name,
+                    input_text=request.text,
+                    origin="agent",
+                    runtime_mode=request.mode,
+                ),
+                definition,
+                cancellation,
+            )
+            return ToolResult(
+                ok=result.status == "completed",
+                message=result.summary or f"Skill `{name}` 执行状态：{result.status}。",
+                data={"skill": name, "mode": "isolated", "status": result.status},
+            )
+        except SkillValidationError as exc:
+            return ToolResult(ok=False, message=exc.message, data={"skill": name, "reason": exc.code})
+
+    def _run_isolated_skill(
+        self,
+        invocation: SkillInvocation,
+        definition: SkillDefinition,
+        cancellation: CancellationToken,
+    ):
+        if self.isolated_skill_executor is None:
+            from mycode.skills.models import IsolatedSkillResult
+
+            return IsolatedSkillResult(status="failed", summary="独立 Skill 执行器未配置。")
+        history = self.context_manager.recent_complete_turns(definition.history or 0)
+        return self.isolated_skill_executor.run(invocation, definition, history, cancellation)
+
 
 def _is_unknown_tool_result(result: ToolResult) -> bool:
     return not result.ok and "未知工具" in result.message
+
+
+def _skill_user_message(definition: SkillDefinition, input_text: str) -> str:
+    return f"使用 Skill `{definition.name}`。\n\nSkill 输入：\n{input_text}"

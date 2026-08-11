@@ -3,7 +3,7 @@ from __future__ import annotations
 import json
 import subprocess
 import sys
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping
 from pathlib import Path
 from threading import Event, Thread
 
@@ -11,6 +11,39 @@ from mycode.tools.base import result_error
 from mycode.types import ToolContext, ToolResult, ToolSpec
 
 from .models import SkillToolDefinition
+
+
+class LoadSkillTool:
+    def __init__(self, handler: Callable[[str], ToolResult]) -> None:
+        self._handler = handler
+        self._spec = ToolSpec(
+            name="load_skill",
+            description=(
+                "按名称加载一个当前目录中的 Skill。共享模式会激活其完整 SOP 和工具白名单；"
+                "独立模式会在隔离对话中执行，并把结果摘要作为工具结果返回。"
+            ),
+            parameters={
+                "type": "object",
+                "properties": {
+                    "name": {
+                        "type": "string",
+                        "description": "要加载的 Skill 唯一名字。",
+                    }
+                },
+                "required": ["name"],
+                "additionalProperties": False,
+            },
+        )
+
+    @property
+    def spec(self) -> ToolSpec:
+        return self._spec
+
+    def run(self, arguments: Mapping[str, object], context: ToolContext) -> ToolResult:
+        name = arguments.get("name")
+        if not isinstance(name, str) or not name.strip():
+            return result_error("参数 `name` 必须是非空字符串。", reason="invalid_arguments")
+        return self._handler(name.strip())
 
 
 class SkillScriptTool:

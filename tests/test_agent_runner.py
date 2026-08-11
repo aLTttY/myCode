@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from collections.abc import Iterator
+from collections.abc import Iterator, Sequence
 from pathlib import Path
 
 from mycode.agent.cancellation import CancellationToken
@@ -9,8 +9,16 @@ from mycode.agent.runner import AgentRunner
 from mycode.context.models import CompactionReport
 from mycode.permissions.service import PermissionService
 from mycode.providers.base import ChatRequest, LLMProvider
+from mycode.skills.models import (
+    IsolatedSkillResult,
+    SkillDefinition,
+    SkillInvocation,
+    SkillSnapshot,
+    immutable_mapping,
+)
+from mycode.skills.runtime import SkillRuntime
 from mycode.tools.registry import create_default_registry
-from mycode.types import ContextConfig, ProviderError, StreamEvent, TokenUsage, ToolContext
+from mycode.types import ContextConfig, Message, ProviderError, StreamEvent, TokenUsage, ToolContext
 
 
 class ScriptedProvider:
@@ -52,6 +60,43 @@ def tool_call_events(tool_call_id: str, name: str, arguments_json: str) -> list[
         StreamEvent(type="tool_call_done", tool_call_id=tool_call_id),
         StreamEvent(type="message_done"),
     ]
+
+
+def skill_definition(name: str, *, mode: str = "shared", sop: str = "Follow the secret SOP.") -> SkillDefinition:
+    return SkillDefinition(
+        name=name,
+        description=f"{name} description",
+        allowed_tools=("read_file",),
+        mode=mode,  # type: ignore[arg-type]
+        history=0 if mode == "isolated" else None,
+        model=None,
+        sop=sop,
+        compiled_sop=sop,
+        source="project",
+        source_id=f"test:{name}",
+        package_root=None,
+        dedicated_tools=(),
+        fingerprint=f"fp:{name}",
+    )
+
+
+def skill_runtime(*definitions: SkillDefinition) -> SkillRuntime:
+    return SkillRuntime(
+        SkillSnapshot(
+            definitions=immutable_mapping({definition.name: definition for definition in definitions}),
+            dedicated_tools=immutable_mapping(),
+        )
+    )
+
+
+class RecordingIsolatedExecutor:
+    def __init__(self, result: IsolatedSkillResult | None = None) -> None:
+        self.result = result or IsolatedSkillResult("completed", "isolated summary")
+        self.calls: list[tuple[SkillInvocation, SkillDefinition, Sequence[Message]]] = []
+
+    def run(self, invocation, definition, history, cancellation):
+        self.calls.append((invocation, definition, history))
+        return self.result
 
 
 def test_agent_runner_completed_after_multiple_iterations(tmp_path: Path) -> None:
@@ -305,3 +350,95 @@ def test_agent_runner_compact_can_override_last_request_mode(tmp_path: Path) -> 
         {"read_file", "find_files", "search_code", "read_git_changes"}
     ]
     assert provider.calls == []
+
+
+def test_load_skill_activates_shared_sop_and_reprojects_tools(tmp_path: Path) -> None:
+    definition = skill_definition("demo", sop="SECRET SHARED SOP")
+    runtime = skill_runtime(definition)
+    provider = ScriptedProvider([
+        tool_call_events("load-1", "load_skill", '{"name":"demo"}'),
+        [StreamEvent(type="text_delta", text="done"), StreamEvent(type="message_done")],
+    ])
+    agent = AgentRunner(
+        provider,
+        create_default_registry(),
+        ToolContext(workspace_root=tmp_path),
+        permission_service=PermissionService.with_mode("allow"),
+        skill_runtime=runtime,
+    )
+
+    events = list(agent.run(AgentRequest("use the reusable workflow")))
+
+    assert events[-1].stop_reason == "completed"
+    assert "load_skill" in {tool.name for tool in provider.calls[0].tools}
+    assert "write_file" in {tool.name for tool in provider.calls[0].tools}
+    assert {tool.name for tool in provider.calls[1].tools} == {"read_file", "load_skill"}
+    assert "demo description" in provider.calls[0].optional_system_prompt
+    assert "SECRET SHARED SOP" not in provider.calls[0].optional_system_prompt
+    assert "SECRET SHARED SOP" in provider.calls[1].optional_system_prompt
+    assert runtime.active_names() == ("demo",)
+
+
+def test_load_skill_runs_isolated_mode_without_activating_it(tmp_path: Path) -> None:
+    definition = skill_definition("audit", mode="isolated")
+    runtime = skill_runtime(definition)
+    isolated = RecordingIsolatedExecutor()
+    provider = ScriptedProvider([
+        tool_call_events("load-1", "load_skill", '{"name":"audit"}'),
+        [StreamEvent(type="text_delta", text="main answer"), StreamEvent(type="message_done")],
+    ])
+    agent = AgentRunner(
+        provider,
+        create_default_registry(),
+        ToolContext(workspace_root=tmp_path),
+        permission_service=PermissionService.with_mode("allow"),
+        skill_runtime=runtime,
+        isolated_skill_executor=isolated,
+    )
+
+    events = list(agent.run(AgentRequest("inspect this input")))
+
+    assert events[-1].stop_reason == "completed"
+    assert runtime.active_names() == ()
+    assert isolated.calls[0][0].input_text == "inspect this input"
+    assert isolated.calls[0][0].origin == "agent"
+    tool_message = next(message for message in provider.calls[1].messages if message.role == "tool")
+    assert "isolated summary" in tool_message.content
+
+
+def test_direct_isolated_skill_returns_summary_and_records_one_turn(tmp_path: Path) -> None:
+    definition = skill_definition("audit", mode="isolated")
+    isolated = RecordingIsolatedExecutor()
+    agent = AgentRunner(
+        ScriptedProvider([]),
+        create_default_registry(),
+        ToolContext(workspace_root=tmp_path),
+        permission_service=PermissionService.with_mode("allow"),
+        skill_runtime=skill_runtime(definition),
+        isolated_skill_executor=isolated,
+    )
+
+    events = list(agent.invoke_skill("audit", "target input"))
+
+    assert [event.text for event in events if event.type == "text_delta"] == ["isolated summary"]
+    assert events[-1].stop_reason == "completed"
+    assert [message.role for message in agent.messages] == ["user", "assistant"]
+    assert "target input" in agent.messages[0].content
+    assert agent.messages[1].content == "isolated summary"
+
+
+def test_new_session_clears_shared_skill_activation(tmp_path: Path) -> None:
+    definition = skill_definition("demo")
+    runtime = skill_runtime(definition)
+    runtime.activate_shared("demo")
+    agent = AgentRunner(
+        ScriptedProvider([]),
+        create_default_registry(),
+        ToolContext(workspace_root=tmp_path),
+        permission_service=PermissionService.with_mode("allow"),
+        skill_runtime=runtime,
+    )
+
+    agent.new_session()
+
+    assert runtime.active_names() == ()
