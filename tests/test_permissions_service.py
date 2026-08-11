@@ -194,3 +194,53 @@ def test_unknown_non_mcp_tool_remains_rejected(tmp_path: Path) -> None:
     )
 
     assert not decision.allowed and decision.reason_code == "unknown_tool"
+
+
+@pytest.mark.parametrize("mode", ["strict", "default", "allow"])
+def test_load_skill_system_tool_auto_allows_without_approval(tmp_path: Path, mode: str) -> None:
+    approval = FakeApproval(["deny"])
+    service = PermissionService(config(mode), approval)
+
+    decision = service.authorize(
+        ToolCall("1", "load_skill", {"name": "demo"}),
+        ToolContext(tmp_path),
+    )
+
+    assert decision.allowed
+    assert decision.reason_code == "system_tool_allow"
+    assert decision.target == "system"
+    assert not approval.calls
+
+
+@pytest.mark.parametrize(
+    ("mode", "choice", "allowed"),
+    [
+        ("strict", None, False),
+        ("default", "allow_once", True),
+        ("allow", None, True),
+    ],
+)
+def test_dynamic_skill_tools_use_call_target(
+    tmp_path: Path,
+    mode: str,
+    choice: str | None,
+    allowed: bool,
+) -> None:
+    approval = FakeApproval([choice]) if choice else FakeApproval([])
+    service = PermissionService(config(mode), approval)
+    service.update_dynamic_call_tools({"demo__lookup"})
+
+    decision = service.authorize(call("demo__lookup", secret="hidden"), ToolContext(tmp_path))
+
+    assert decision.allowed is allowed
+    assert decision.target == "call"
+
+
+def test_dynamic_skill_tool_update_is_exact(tmp_path: Path) -> None:
+    service = PermissionService(config("allow"))
+    service.update_dynamic_call_tools({"demo__lookup"})
+    assert service.authorize(call("demo__lookup"), ToolContext(tmp_path)).allowed
+
+    service.update_dynamic_call_tools(set())
+    decision = service.authorize(call("demo__lookup"), ToolContext(tmp_path))
+    assert not decision.allowed and decision.reason_code == "unknown_tool"

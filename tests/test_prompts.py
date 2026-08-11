@@ -27,12 +27,19 @@ def test_optional_prompt_modules_order() -> None:
     modules = optional_prompt_modules(
         PromptOptions(
             custom_instructions="custom",
+            skill_catalog="- demo: catalog",
             active_skills=("skill-a", "skill-b"),
             long_term_memory="memory",
         )
     )
 
-    assert [module.key for module in modules] == ["custom_instructions", "active_skills", "long_term_memory"]
+    assert [module.key for module in modules] == [
+        "active_skills",
+        "skill_catalog",
+        "custom_instructions",
+        "long_term_memory",
+    ]
+    assert modules[0].content == "skill-a\n\nskill-b"
 
 
 def test_mode_instruction_full_and_compact() -> None:

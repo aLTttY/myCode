@@ -14,6 +14,7 @@ class PromptModule:
 @dataclass(frozen=True)
 class PromptOptions:
     custom_instructions: str = ""
+    skill_catalog: str = ""
     active_skills: tuple[str, ...] = ()
     long_term_memory: str = ""
 
@@ -83,21 +84,30 @@ def fixed_prompt_modules() -> tuple[PromptModule, ...]:
 
 def optional_prompt_modules(options: PromptOptions) -> tuple[PromptModule, ...]:
     modules: list[PromptModule] = []
+    if options.active_skills:
+        modules.append(
+            PromptModule(
+                key="active_skills",
+                title="已激活的 Skill（当前任务的高优先级 SOP）",
+                content="\n\n".join(options.active_skills),
+                stable=False,
+            )
+        )
+    if options.skill_catalog.strip():
+        modules.append(
+            PromptModule(
+                key="skill_catalog",
+                title="可按需加载的 Skill（仅名称与说明）",
+                content=options.skill_catalog.strip(),
+                stable=False,
+            )
+        )
     if options.custom_instructions.strip():
         modules.append(
             PromptModule(
                 key="custom_instructions",
                 title="自定义指令（按来源标注的优先级执行）",
                 content=options.custom_instructions.strip(),
-                stable=False,
-            )
-        )
-    if options.active_skills:
-        modules.append(
-            PromptModule(
-                key="active_skills",
-                title="已激活的 Skill",
-                content="\n".join(f"- {skill}" for skill in options.active_skills),
                 stable=False,
             )
         )

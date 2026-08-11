@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import re
+from collections.abc import Iterable
 
 from mycode.tools.base import Tool
 from mycode.tools.command import RunCommandTool
@@ -36,6 +37,28 @@ class ToolRegistry:
             return self._tools[name]
         except KeyError as exc:
             raise ToolError(f"未知工具：{name}") from exc
+
+    def contains(self, name: str) -> bool:
+        return name in self._tools
+
+    def names(self) -> tuple[str, ...]:
+        return tuple(self._tools)
+
+    def subset(self, names: Iterable[str]) -> ToolRegistry:
+        registry = ToolRegistry()
+        for name in names:
+            registry.register(self.get(name))
+        return registry
+
+    def copy(self) -> ToolRegistry:
+        return self.subset(self.names())
+
+    def merge(self, *others: ToolRegistry) -> ToolRegistry:
+        registry = self.copy()
+        for other in others:
+            for name in other.names():
+                registry.register(other.get(name))
+        return registry
 
     def tool_specs(self) -> list[ToolSpec]:
         return [tool.spec for tool in self._tools.values()]

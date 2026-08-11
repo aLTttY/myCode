@@ -3,7 +3,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 
 from mycode.tools.registry import ToolRegistry
-from mycode.tool_safety import READ_TOOLS, ToolSafety, classify_tool
+from mycode.tool_safety import READ_TOOLS, SYSTEM_TOOLS, ToolSafety, classify_tool
 from mycode.types import ToolCall
 
 
@@ -15,8 +15,9 @@ class ToolBatch:
 
 def create_readonly_registry(full_registry: ToolRegistry) -> ToolRegistry:
     registry = ToolRegistry()
-    for name in sorted(READ_TOOLS):
-        registry.register(full_registry.get(name))
+    for name in sorted(READ_TOOLS | SYSTEM_TOOLS):
+        if full_registry.contains(name):
+            registry.register(full_registry.get(name))
     return registry
 
 

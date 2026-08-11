@@ -35,6 +35,13 @@ SUMMARY_TAG = "mewcode_context_summary"
 BOUNDARY_TAG = "mewcode_context_boundary"
 
 
+def _is_complete_turn(messages: Sequence[Message]) -> bool:
+    if not messages or messages[0].role != "user":
+        return False
+    last = messages[-1]
+    return last.role == "assistant" and not last.tool_calls
+
+
 class ContextManager:
     def __init__(
         self,
@@ -63,6 +70,26 @@ class ContextManager:
     @property
     def state(self) -> ContextState:
         return self._state
+
+    def recent_complete_turns(self, limit: int) -> tuple[Message, ...]:
+        if isinstance(limit, bool) or not isinstance(limit, int) or limit < 0:
+            raise ValueError("历史轮数必须是非负整数。")
+        if limit == 0:
+            return ()
+
+        turns: list[tuple[Message, ...]] = []
+        current: list[Message] = []
+        for message in self.messages:
+            if message.role == "user":
+                if _is_complete_turn(current):
+                    turns.append(tuple(current))
+                current = [message]
+            elif current:
+                current.append(message)
+        if _is_complete_turn(current):
+            turns.append(tuple(current))
+        selected = turns[-limit:]
+        return tuple(message for turn in selected for message in turn)
 
     def status(self, template: ChatRequest) -> ContextStatus:
         request = self._build_request(

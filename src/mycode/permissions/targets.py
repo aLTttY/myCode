@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from collections.abc import Mapping
 from pathlib import Path
+from threading import RLock
 
 from mycode.types import ToolCall
 
@@ -20,8 +21,18 @@ def _required_string(arguments: Mapping[str, object], key: str) -> str:
 
 
 class PermissionTargetResolver:
-    def __init__(self, mcp_tool_prefixes: tuple[str, ...] = ()) -> None:
+    def __init__(
+        self,
+        mcp_tool_prefixes: tuple[str, ...] = (),
+        dynamic_call_tools: tuple[str, ...] = (),
+    ) -> None:
         self.mcp_tool_prefixes = tuple(mcp_tool_prefixes)
+        self._dynamic_call_tools = frozenset(dynamic_call_tools)
+        self._lock = RLock()
+
+    def update_dynamic_call_tools(self, names: set[str] | frozenset[str]) -> None:
+        with self._lock:
+            self._dynamic_call_tools = frozenset(names)
 
     def resolve(self, call: ToolCall, workspace_root: Path) -> PermissionRequest:
         if call.name in FILE_TOOLS:
@@ -40,6 +51,8 @@ class PermissionTargetResolver:
             for prefix in self.mcp_tool_prefixes
         ):
             target = "call"
+        elif self._is_dynamic_call_tool(call.name):
+            target = "call"
         else:
             raise PermissionValidationError("unknown_tool", f"未知工具：{call.name}")
         return PermissionRequest(
@@ -49,3 +62,7 @@ class PermissionTargetResolver:
             arguments=call.arguments,
             workspace_root=workspace_root.resolve(),
         )
+
+    def _is_dynamic_call_tool(self, name: str) -> bool:
+        with self._lock:
+            return name in self._dynamic_call_tools

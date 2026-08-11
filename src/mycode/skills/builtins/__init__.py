@@ -1,0 +1,1 @@
+"""MyCode bundled Skill resources."""

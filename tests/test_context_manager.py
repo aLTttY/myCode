@@ -315,3 +315,51 @@ def test_failed_compaction_report_preserves_summary_usage(
 
     assert report.status == "failed"
     assert report.summary_token_usage == usage
+
+
+def test_recent_complete_turns_selects_full_user_turns(tmp_path: Path) -> None:
+    context = configured_manager(tmp_path)
+    context.append_user("first")
+    context.append_assistant("first answer")
+    context.append_user("second")
+    add_tool_turn(context, ("tool-1", execution("complete")))
+    context.append_assistant("second answer")
+    context.append_user("third incomplete")
+    add_tool_turn(context, ("tool-2", execution("pending")))
+
+    recent = context.recent_complete_turns(2)
+
+    assert [message.role for message in recent] == [
+        "user",
+        "assistant",
+        "user",
+        "assistant",
+        "tool",
+        "assistant",
+    ]
+    assert recent[0].content == "first"
+    assert recent[2].content == "second"
+    assert all(message.content != "third incomplete" for message in recent)
+
+
+def test_recent_complete_turns_zero_and_limit_are_readonly(tmp_path: Path) -> None:
+    context = configured_manager(tmp_path)
+    context.append_user("one")
+    context.append_assistant("answer one")
+    context.append_user("two")
+    context.append_assistant("answer two")
+    state = context.state
+    messages = context.messages
+
+    assert context.recent_complete_turns(0) == ()
+    assert context.recent_complete_turns(1) == messages[-2:]
+    assert context.recent_complete_turns(99) == messages
+    assert context.state is state
+    assert context.messages == messages
+
+
+@pytest.mark.parametrize("limit", [-1, True, 1.5])
+def test_recent_complete_turns_rejects_invalid_limit(tmp_path: Path, limit) -> None:
+    context = configured_manager(tmp_path)
+    with pytest.raises(ValueError, match="非负整数"):
+        context.recent_complete_turns(limit)

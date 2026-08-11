@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from threading import RLock
 
-from mycode.tool_safety import is_read_tool
+from mycode.tool_safety import is_read_tool, is_system_tool
 from mycode.types import ToolCall, ToolContext
 
 from .approval import ApprovalHandler, DenyApprovalHandler
@@ -53,6 +53,13 @@ class PermissionService:
         return cls(config, approval_handler, mcp_tool_prefixes)
 
     def authorize(self, call: ToolCall, context: ToolContext) -> PermissionDecision:
+        if is_system_tool(call.name):
+            return PermissionDecision(
+                True,
+                "system_tool_allow",
+                "系统能力选择工具已自动允许；业务工具仍需单独授权。",
+                "system",
+            )
         try:
             request = self._resolver.resolve(call, context.workspace_root)
         except PermissionValidationError as exc:
@@ -130,3 +137,6 @@ class PermissionService:
     def session_rule_count(self) -> int:
         with self._lock:
             return len(self._session_rules)
+
+    def update_dynamic_call_tools(self, names: set[str] | frozenset[str]) -> None:
+        self._resolver.update_dynamic_call_tools(names)

@@ -58,3 +58,26 @@ def test_registry_rejects_invalid_tool_name() -> None:
 
     with pytest.raises(ToolError, match="工具名"):
         ToolRegistry().register(InvalidTool())
+
+
+def test_registry_subset_copy_and_merge_preserve_order() -> None:
+    full = create_default_registry()
+    subset = full.subset(("search_code", "read_file"))
+
+    assert subset.names() == ("search_code", "read_file")
+    assert subset.contains("read_file")
+    assert not subset.contains("write_file")
+    assert full.copy().names() == full.names()
+
+    other = ToolRegistry()
+    other.register(full.get("write_file"))
+    assert subset.merge(other).names() == ("search_code", "read_file", "write_file")
+
+
+def test_registry_merge_rejects_duplicate() -> None:
+    full = create_default_registry()
+    left = full.subset(("read_file",))
+    right = full.subset(("read_file",))
+
+    with pytest.raises(ToolError, match="已注册"):
+        left.merge(right)
