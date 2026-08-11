@@ -11,7 +11,7 @@ from prompt_toolkit.output import DummyOutput
 from mycode import cli
 from mycode.agent.config import AgentRequest
 from mycode.agent.events import AgentEvent
-from mycode.commands import CommandRegistrationError, REVIEW_PROMPT
+from mycode.commands import CommandRegistrationError
 from mycode.mcp import MCPDiscoveryWarning, MCPRemoteTool
 from mycode.permissions.approval import TerminalApprovalHandler, select_approval_choice
 from mycode.permissions.models import ApprovalPrompt, PermissionConfigSet, PermissionLayer
@@ -567,6 +567,7 @@ class StatefulAgent:
     def __init__(self, provider: object, *args: object, **kwargs: object) -> None:
         self.provider = provider
         self.requests: list[AgentRequest] = []
+        self.skill_requests: list[tuple[str, str, str]] = []
         self.context_status_calls: list[str] = []
         self.session_journal = kwargs["session_journal"]
         self.new_calls = 0
@@ -583,6 +584,10 @@ class StatefulAgent:
             token_usage=TokenUsage(input_tokens=11, output_tokens=7, total_tokens=18),
         )
         yield AgentEvent(type="done", stop_reason="completed", message="任务完成。")
+
+    def invoke_skill(self, name, input_text, *, mode="default", cancellation=None):
+        self.skill_requests.append((name, input_text, mode))
+        yield AgentEvent(type="done", stop_reason="completed", message="Skill 执行完成。")
 
     def context_status(self, mode="default") -> ContextStatus:
         self.context_status_calls.append(mode)
@@ -701,8 +706,8 @@ def test_slash_command_end_to_end_routes_only_plain_and_review_to_agent(
     agent = StatefulAgent.instances[0]
     assert agent.requests == [
         AgentRequest("检查当前实现", mode="plan"),
-        AgentRequest(REVIEW_PROMPT, mode="plan"),
     ]
+    assert agent.skill_requests == [("review", "", "plan")]
     assert CapturingPromptSession.instances[0].toolbar_values == [
         "[PLAN]",
         "[DEFAULT]",
@@ -766,7 +771,7 @@ def test_clear_preserves_mode_session_and_last_usage(
     assert "origin=new" in output
 
 
-def test_review_is_one_shot_plan_and_does_not_change_default_mode(
+def test_review_is_isolated_skill_and_does_not_change_default_mode(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     _prepare_stateful_cli(monkeypatch)
@@ -776,9 +781,9 @@ def test_review_is_one_shot_plan_and_does_not_change_default_mode(
     assert cli.main([]) == 0
 
     assert StatefulAgent.instances[0].requests == [
-        AgentRequest(REVIEW_PROMPT, mode="plan"),
         AgentRequest("继续执行", mode="default"),
     ]
+    assert StatefulAgent.instances[0].skill_requests == [("review", "", "default")]
     assert CapturingPromptSession.instances[0].kwargs["bottom_toolbar"]() == "[DEFAULT]"
 
 

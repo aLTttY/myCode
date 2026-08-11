@@ -37,6 +37,12 @@ from .permissions.models import PermissionConfigSet
 from .permissions.service import PermissionService
 from .providers.factory import create_provider
 from .sessions import SessionCatalog, SessionJournal
+from .skills.catalog import SkillCatalog
+from .skills.commands import commands_from_snapshot
+from .skills.isolated import IsolatedSkillRunner
+from .skills.models import SkillCatalogError
+from .skills.runtime import SkillRuntime
+from .tool_safety import SYSTEM_TOOLS
 from .tools.registry import create_default_registry
 from .context.models import CompactionReport
 from .types import ConfigError, ProviderError, TokenUsage, ToolContext, ToolError
@@ -92,22 +98,9 @@ def main(argv: Sequence[str] | None = None) -> int:
         provider = create_provider(config)
         memory_provider = create_provider(config)
         tool_registry = create_default_registry()
-        known_tools = {spec.name for spec in tool_registry.tool_specs()}
         workspace_root = Path.cwd()
         mcp_tool_prefixes = tuple(
             f"{server.name}__" for server in config.mcp_servers
-        )
-        permission_config = PermissionConfigLoader(
-            known_tools,
-            mcp_tool_prefixes=mcp_tool_prefixes,
-        ).load(
-            workspace_root,
-            args.permission_mode,
-        )
-        permission_service = PermissionService(
-            permission_config,
-            TerminalApprovalHandler(),
-            mcp_tool_prefixes=mcp_tool_prefixes,
         )
     except ConfigError as exc:
         print(f"配置错误：{exc.user_message}", file=sys.stderr)
@@ -143,6 +136,31 @@ def main(argv: Sequence[str] | None = None) -> int:
                 file=sys.stderr,
             )
 
+        reserved_commands = tuple(
+            token
+            for command in command_registry.commands(include_hidden=True)
+            for token in (command.name, *command.aliases)
+        )
+        skill_catalog = SkillCatalog(workspace_root)
+        skill_snapshot = skill_catalog.load_initial(
+            set(tool_registry.names()) | set(SYSTEM_TOOLS),
+            reserved_commands,
+        )
+        skill_runtime = SkillRuntime(skill_snapshot)
+        command_registry.replace_dynamic(commands_from_snapshot(skill_snapshot))
+        known_permission_tools = set(tool_registry.names()) | set(skill_snapshot.dedicated_tools) | set(SYSTEM_TOOLS)
+        permission_config = PermissionConfigLoader(
+            known_permission_tools,
+            mcp_tool_prefixes=mcp_tool_prefixes,
+        ).load(workspace_root, args.permission_mode)
+        permission_service = PermissionService(
+            permission_config,
+            TerminalApprovalHandler(),
+            mcp_tool_prefixes=mcp_tool_prefixes,
+        )
+        permission_service.update_dynamic_call_tools(set(skill_snapshot.dedicated_tools))
+        _print_skill_diagnostics(skill_snapshot.diagnostics)
+
         catalog = SessionCatalog(workspace_root)
         cleanup = catalog.cleanup_expired()
         for warning in cleanup.warnings:
@@ -174,6 +192,14 @@ def main(argv: Sequence[str] | None = None) -> int:
             except Exception as exc:
                 print(f"[memory] {scope} 索引协调失败（{type(exc).__name__}）。", file=sys.stderr)
         memory_worker = MemoryWorker(MemoryService(memory_provider, memory_store))
+        isolated_skill_runner = IsolatedSkillRunner(
+            app_config=config,
+            base_registry=tool_registry,
+            tool_context=ToolContext(workspace_root=workspace_root),
+            permission_service=permission_service,
+            snapshot_supplier=lambda: skill_runtime.snapshot,
+            instruction_bundle=instruction_bundle,
+        )
 
         # 创建 Agent 执行器：
         # provider 负责调用模型，registry 保存工具，workspace_root 限制工具工作目录
@@ -189,6 +215,8 @@ def main(argv: Sequence[str] | None = None) -> int:
             memory_worker=memory_worker,
             restored_messages=restored_messages,
             time_gap_reminder=time_gap_reminder,
+            skill_runtime=skill_runtime,
+            isolated_skill_executor=isolated_skill_runner,
         )
         try:
             return _run_interactive(
@@ -202,6 +230,9 @@ def main(argv: Sequence[str] | None = None) -> int:
                 workspace_root=workspace_root,
                 session_origin=session_origin,
                 permission_mode_override=args.permission_mode,
+                skill_catalog=skill_catalog,
+                skill_runtime=skill_runtime,
+                reserved_commands=reserved_commands,
             )
         finally:
             close = getattr(agent, "close", None)
@@ -214,6 +245,10 @@ def main(argv: Sequence[str] | None = None) -> int:
                 for notice in memory_worker.drain(0):
                     if notice.code != "updated":
                         print(f"[memory] {notice.message}", file=sys.stderr)
+    except (ConfigError, SkillCatalogError, CommandRegistrationError, ToolError) as exc:
+        message = getattr(exc, "user_message", str(exc))
+        print(f"Skill 启动错误：{message}", file=sys.stderr)
+        return 1
     finally:
         mcp_manager.close()
 
@@ -276,6 +311,16 @@ class TerminalCommandUI:
     ) -> None:
         request = AgentRequest(text=text, mode=mode_override or self._current_mode)
         _run_agent_turn(self.agent, request, self._remember_token_usage)
+
+    def invoke_skill(self, name: str, input_text: str) -> None:
+        cancellation = CancellationToken()
+        events = self.agent.invoke_skill(
+            name,
+            input_text,
+            mode=self._current_mode,
+            cancellation=cancellation,
+        )
+        _render_agent_events(self.agent, events, cancellation, self._remember_token_usage)
 
     def switch_mode(self, mode: RuntimeMode) -> None:
         self._current_mode = mode
@@ -407,6 +452,9 @@ def _run_interactive(
     workspace_root: Path,
     session_origin: str,
     permission_mode_override: str | None,
+    skill_catalog: SkillCatalog | None = None,
+    skill_runtime: SkillRuntime | None = None,
+    reserved_commands: tuple[str, ...] = (),
 ) -> int:
     global _ACTIVE_PROMPT_SESSION
 
@@ -449,6 +497,18 @@ def _run_interactive(
                 print()
                 return 0
 
+            if skill_catalog is not None and skill_runtime is not None:
+                active_registry = getattr(agent, "full_registry", None)
+                if active_registry is not None:
+                    _refresh_skills(
+                        skill_catalog,
+                        skill_runtime,
+                        active_registry,
+                        command_registry,
+                        permission_service,
+                        reserved_commands,
+                    )
+
             route = router.route(raw_text)
             if route.kind == "empty":
                 continue
@@ -467,15 +527,60 @@ def _run_interactive(
         _ACTIVE_PROMPT_SESSION = previous_session
 
 
+def _refresh_skills(
+    catalog: SkillCatalog,
+    runtime: SkillRuntime,
+    tool_registry,
+    command_registry,
+    permission_service: PermissionService,
+    reserved_commands: tuple[str, ...],
+) -> None:
+    report = catalog.refresh(
+        runtime.snapshot,
+        set(tool_registry.names()) | set(SYSTEM_TOOLS),
+        reserved_commands,
+    )
+    if not report.changed:
+        return
+    try:
+        command_registry.replace_dynamic(commands_from_snapshot(report.snapshot))
+    except CommandRegistrationError as exc:
+        print(f"[skills] 热更新失败：{exc}", file=sys.stderr)
+        return
+    permission_service.update_dynamic_call_tools(set(report.snapshot.dedicated_tools))
+    update = runtime.publish(report.snapshot)
+    _print_skill_diagnostics(report.diagnostics)
+    changes: list[str] = []
+    if update.replaced:
+        changes.append(f"已替换激活项={','.join(update.replaced)}")
+    if update.deactivated:
+        changes.append(f"已停用={','.join(update.deactivated)}")
+    suffix = f"（{'；'.join(changes)}）" if changes else ""
+    print(f"[skills] 已热更新{suffix}", file=sys.stderr)
+
+
+def _print_skill_diagnostics(diagnostics) -> None:
+    for diagnostic in diagnostics:
+        print(
+            f"[skills] {diagnostic.level} {diagnostic.code}: "
+            f"{diagnostic.source_id} -> {diagnostic.message}",
+            file=sys.stderr,
+        )
+
+
 def _run_agent_turn(
     agent: AgentRunner,
     request: AgentRequest,
     on_token_usage,
 ) -> None:
-    assistant_started = False
     cancellation = CancellationToken()
+    _render_agent_events(agent, agent.run(request, cancellation), cancellation, on_token_usage)
+
+
+def _render_agent_events(agent, events, cancellation, on_token_usage) -> None:
+    assistant_started = False
     try:
-        for event in agent.run(request, cancellation):
+        for event in events:
             if event.type == "text_delta":
                 if not assistant_started:
                     print("● ", end="", flush=True)
