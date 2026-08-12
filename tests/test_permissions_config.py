@@ -112,3 +112,25 @@ def test_unconfigured_dynamic_namespace_rule_is_rejected(tmp_path: Path) -> None
 
     with pytest.raises(ConfigError, match="未知工具"):
         PermissionConfigLoader(TOOLS, tmp_path / "home").load(workspace)
+
+
+def test_regex_and_negated_rules_load_from_yaml(tmp_path: Path) -> None:
+    workspace = tmp_path / "workspace"
+    write(
+        workspace / ".mycode/permissions.yaml",
+        "allow:\n  - 'run_command(re:^git status$)'\n"
+        "deny:\n  - '!write_file(glob:docs/*)'\n",
+    )
+
+    loaded = PermissionConfigLoader(TOOLS, tmp_path / "home").load(workspace)
+
+    assert loaded.project.rules[0].match_type == "regex"
+    assert loaded.project.rules[1].matcher.negated
+
+
+def test_invalid_regex_in_yaml_fails_configuration(tmp_path: Path) -> None:
+    workspace = tmp_path / "workspace"
+    write(workspace / ".mycode/permissions.yaml", "allow:\n  - 'run_command(re:()'\n")
+
+    with pytest.raises(ConfigError, match="正则"):
+        PermissionConfigLoader(TOOLS, tmp_path / "home").load(workspace)

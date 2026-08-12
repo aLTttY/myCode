@@ -1,13 +1,12 @@
 from __future__ import annotations
 
-import fnmatch
 import re
 from collections.abc import Iterable, Sequence
 
+from mycode.matching import MatchPatternError, parse_match_pattern
 from mycode.tools.registry import is_valid_tool_name
 
 from .models import (
-    MatchType,
     PermissionDecision,
     PermissionLayer,
     PermissionRequest,
@@ -17,8 +16,7 @@ from .models import (
 )
 
 
-RULE_PATTERN = re.compile(r"^([A-Za-z0-9_-]{1,64})\((.+)\)$", re.DOTALL)
-GLOB_PATTERN = re.compile(r"[*?[]")
+RULE_PATTERN = re.compile(r"^(!)?([A-Za-z0-9_-]{1,64})\((.+)\)$", re.DOTALL)
 
 
 def parse_rule(
@@ -33,7 +31,7 @@ def parse_rule(
     match = RULE_PATTERN.fullmatch(expression.strip())
     if match is None:
         raise ValueError(f"无效权限规则：{expression!r}。应使用 工具名(模式)。")
-    tool, pattern = match.groups()
+    negated_text, tool, pattern = match.groups()
     prefixes = tuple(allowed_tool_prefixes)
     known = tool in set(known_tools)
     allowed_dynamic = is_valid_tool_name(tool) and any(
@@ -42,16 +40,17 @@ def parse_rule(
     )
     if not known and not allowed_dynamic:
         raise ValueError(f"权限规则引用未知工具：{tool}")
-    match_type: MatchType = "glob" if GLOB_PATTERN.search(pattern) else "exact"
-    return PermissionRule(tool=tool, pattern=pattern, effect=effect, source=source, match_type=match_type)
+    try:
+        matcher = parse_match_pattern(pattern, negated=bool(negated_text))
+    except MatchPatternError as exc:
+        raise ValueError(str(exc)) from exc
+    return PermissionRule(tool=tool, matcher=matcher, effect=effect, source=source)
 
 
 def rule_matches(rule: PermissionRule, request: PermissionRequest) -> bool:
     if rule.tool != request.tool:
         return False
-    if rule.match_type == "exact":
-        return rule.pattern == request.target
-    return fnmatch.fnmatchcase(request.target, rule.pattern)
+    return rule.matcher.matches(request.target)
 
 
 class RuleEngine:
@@ -64,8 +63,10 @@ class RuleEngine:
             matches = [rule for rule in layer.rules if rule_matches(rule, request)]
             if not matches:
                 continue
-            exact = [rule for rule in matches if rule.match_type == "exact"]
-            candidates = exact or matches
+            highest_priority = max(rule.matcher.priority for rule in matches)
+            candidates = [
+                rule for rule in matches if rule.matcher.priority == highest_priority
+            ]
             denied = [rule for rule in candidates if rule.effect == "deny"]
             selected = denied[0] if denied else candidates[0]
             allowed = selected.effect == "allow"

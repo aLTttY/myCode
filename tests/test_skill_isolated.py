@@ -4,6 +4,7 @@ from pathlib import Path
 
 from mycode.agent.cancellation import CancellationToken
 from mycode.permissions.service import PermissionService
+from mycode.prompts.modes import DynamicInstruction
 from mycode.providers.base import ChatRequest
 from mycode.skills.isolated import IsolatedSkillRunner
 from mycode.skills.models import (
@@ -228,3 +229,48 @@ def test_isolated_does_not_reuse_temporary_activation_across_calls(tmp_path: Pat
 
     assert (first.summary, second.summary) == ("first", "second")
     assert all({tool.name for tool in call.tools} == {"read_file", "load_skill"} for call in provider.calls)
+
+
+def test_isolated_receives_one_shot_dynamic_instructions_without_hook_runtime(tmp_path: Path) -> None:
+    root = definition("review")
+    provider = ScriptedProvider(
+        [[StreamEvent(type="text_delta", text="done"), StreamEvent(type="message_done")]]
+    )
+    isolated, _ = runner(tmp_path, root, provider)
+    settled: list[str] = []
+
+    result = isolated.run(
+        invocation("review"),
+        root,
+        (),
+        CancellationToken(),
+        dynamic_instructions=(DynamicInstruction("hook", "isolated prompt", True),),
+        on_instructions_commit=lambda: settled.append("commit"),
+        on_instructions_release=lambda: settled.append("release"),
+    )
+
+    assert result.status == "completed"
+    assert "isolated prompt" in [item.content for item in provider.calls[0].dynamic_system_messages]
+    assert settled == ["commit"]
+
+
+def test_isolated_releases_dynamic_instructions_when_cancelled_before_provider(tmp_path: Path) -> None:
+    root = definition("review")
+    provider = ScriptedProvider([[StreamEvent(type="message_done")]])
+    isolated, _ = runner(tmp_path, root, provider)
+    token = CancellationToken()
+    token.cancel()
+    settled: list[str] = []
+
+    isolated.run(
+        invocation("review"),
+        root,
+        (),
+        token,
+        dynamic_instructions=(DynamicInstruction("hook", "keep", True),),
+        on_instructions_commit=lambda: settled.append("commit"),
+        on_instructions_release=lambda: settled.append("release"),
+    )
+
+    assert provider.calls == []
+    assert settled == ["release"]

@@ -12,6 +12,7 @@ from mycode import cli
 from mycode.agent.config import AgentRequest
 from mycode.agent.events import AgentEvent
 from mycode.commands import CommandRegistrationError
+from mycode.hooks.models import HookRule, HookSnapshot, PromptAction
 from mycode.mcp import MCPDiscoveryWarning, MCPRemoteTool
 from mycode.permissions.approval import TerminalApprovalHandler, select_approval_choice
 from mycode.permissions.models import ApprovalPrompt, PermissionConfigSet, PermissionLayer
@@ -850,3 +851,122 @@ def test_agent_keyboard_interrupt_cancels_only_current_turn(
         "继续",
     ]
     assert "已取消" in capsys.readouterr().out
+
+
+def test_invalid_hook_config_stops_before_provider_and_mcp_initialization(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    tmp_path: Path,
+) -> None:
+    hook_path = tmp_path / ".mycode/hooks.yaml"
+    hook_path.parent.mkdir(parents=True, exist_ok=True)
+    hook_path.write_text(
+        "hooks:\n  - event: session_end\n    action: {type: prompt, content: invalid}\n",
+        encoding="utf-8",
+    )
+    calls: list[str] = []
+    monkeypatch.setattr(
+        cli,
+        "load_config",
+        lambda path: AppConfig("deepseek", "m", "u", "k"),
+    )
+    monkeypatch.setattr(cli, "create_provider", lambda config: calls.append("provider"))
+
+    class MustNotCreateMCP:
+        def __init__(self, servers):
+            calls.append("mcp")
+
+    monkeypatch.setattr(cli, "MCPManager", MustNotCreateMCP)
+
+    assert cli.main([]) == 1
+    assert calls == []
+    assert "Hook 配置" in capsys.readouterr().err
+
+
+def test_cli_hook_session_lifecycle_includes_new_switch_and_cleanup_order(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    events: list[tuple] = []
+    snapshot = HookSnapshot(
+        (
+            HookRule(
+                "project:1",
+                "project",
+                Path("/workspace/.mycode/hooks.yaml"),
+                1,
+                "session_start",
+                None,
+                PromptAction("hello"),
+            ),
+        )
+    )
+
+    class FakeHookLoader:
+        def load(self, workspace_root):
+            return snapshot
+
+    class FakeHookRuntime:
+        def __init__(self, snapshot, event_factory, action_executor, diagnostic_sink):
+            self.closed = False
+
+        def begin_session(self, session_id, origin):
+            events.append(("begin", session_id, origin))
+
+        def end_session(self, reason):
+            events.append(("end", reason))
+
+        def close(self):
+            if self.closed:
+                return
+            self.closed = True
+            events.append(("hook_close",))
+
+    class LifecycleAgent(StatefulAgent):
+        def __init__(self, provider, *args, **kwargs):
+            super().__init__(provider, *args, **kwargs)
+            self.hook_runtime = kwargs["hook_runtime"]
+
+        def new_session(self):
+            events.append(("agent_new",))
+            return super().new_session()
+
+        def close(self):
+            events.append(("agent_close",))
+            return None
+
+    _prepare_stateful_cli(monkeypatch)
+    LifecycleAgent.instances = []
+    monkeypatch.setattr(cli, "AgentRunner", LifecycleAgent)
+    monkeypatch.setattr(cli, "HookConfigLoader", FakeHookLoader)
+    monkeypatch.setattr(cli, "HookRuntime", FakeHookRuntime)
+    inputs = iter(["/new", "exit"])
+    monkeypatch.setattr(cli, "read_user_input", lambda prompt: next(inputs))
+
+    assert cli.main([]) == 0
+
+    assert events[0][0] == "begin" and events[0][2] == "new"
+    assert events[1:] == [
+        ("end", "switched"),
+        ("agent_new",),
+        ("begin", "20260810-120000-abcd", "new"),
+        ("end", "exit"),
+        ("agent_close",),
+        ("hook_close",),
+    ]
+
+
+def test_render_keyboard_interrupt_closes_event_iterator() -> None:
+    closed: list[bool] = []
+
+    def interrupted():
+        try:
+            raise KeyboardInterrupt
+            yield AgentEvent(type="done")
+        finally:
+            closed.append(True)
+
+    cancellation = cli.CancellationToken()
+    cli._render_agent_events(object(), interrupted(), cancellation, lambda usage: None)
+
+    assert cancellation.is_cancelled()
+    assert closed == [True]

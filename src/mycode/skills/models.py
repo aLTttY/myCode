@@ -3,8 +3,10 @@ from __future__ import annotations
 from dataclasses import dataclass
 from pathlib import Path
 from types import MappingProxyType
+from collections.abc import Callable
 from typing import TYPE_CHECKING, Literal, Mapping, Protocol, Sequence, TypeVar
 
+from mycode.prompts.modes import DynamicInstruction
 from mycode.types import Message, TokenUsage, UserFacingError
 
 if TYPE_CHECKING:
@@ -100,6 +102,10 @@ class IsolatedSkillExecutor(Protocol):
         definition: SkillDefinition,
         history: Sequence[Message],
         cancellation: CancellationToken,
+        *,
+        dynamic_instructions: Sequence[DynamicInstruction] = (),
+        on_instructions_commit: Callable[[], None] | None = None,
+        on_instructions_release: Callable[[], None] | None = None,
     ) -> IsolatedSkillResult:
         ...
 

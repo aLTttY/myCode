@@ -7,7 +7,8 @@ import pytest
 
 import mycode.context.manager as manager_module
 from mycode.context.manager import BOUNDARY_TAG, SUMMARY_TAG, ContextManager
-from mycode.context.models import ContextConfig, SummaryOutput
+from mycode.context.models import CompactionReport, ContextConfig, SummaryOutput
+from mycode.prompts.modes import DynamicInstruction
 from mycode.context.prompts import SUMMARY_HEADINGS
 from mycode.context.storage import ContextStorageError
 from mycode.context.summary import SummaryFailure
@@ -363,3 +364,41 @@ def test_recent_complete_turns_rejects_invalid_limit(tmp_path: Path, limit) -> N
     context = configured_manager(tmp_path)
     with pytest.raises(ValueError, match="非负整数"):
         context.recent_complete_turns(limit)
+
+
+def test_rebuild_prepared_request_replaces_dynamic_and_rechecks_without_compaction(
+    tmp_path: Path,
+) -> None:
+    context = configured_manager(tmp_path, window=20_000)
+    context.append_user("hello")
+    base = template()
+    prepared = context.prepare_request(base)
+    updated = ChatRequest(
+        stable_system_prompt=base.stable_system_prompt,
+        dynamic_system_messages=(DynamicInstruction("hook", "remember", True),),
+        messages=(),
+        tools=(),
+    )
+
+    rebuilt = context.rebuild_prepared_request(updated, prepared.report)
+
+    assert rebuilt.allowed
+    assert rebuilt.request.messages == (Message(role="user", content="hello"),)
+    assert [item.tag for item in rebuilt.request.dynamic_system_messages] == ["hook"]
+    assert rebuilt.report.after_tokens >= prepared.report.after_tokens
+
+
+def test_rebuild_prepared_request_can_reject_new_dynamic_instruction(tmp_path: Path) -> None:
+    context = configured_manager(tmp_path, window=20_000)
+    report = CompactionReport("not_needed", "automatic", 1, 1, 2)
+    updated = ChatRequest(
+        stable_system_prompt="system",
+        dynamic_system_messages=(DynamicInstruction("hook", "large prompt", True),),
+        messages=(),
+        tools=(),
+    )
+
+    rebuilt = context.rebuild_prepared_request(updated, report)
+
+    assert not rebuilt.allowed
+    assert "动态系统指令" in rebuilt.report.reason

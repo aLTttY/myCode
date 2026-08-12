@@ -11,6 +11,7 @@ from mycode.agent.tools import ToolBatch, ToolBatcher
 from mycode.permissions.models import PermissionConfigSet, PermissionDecision, PermissionLayer
 from mycode.permissions.service import PermissionService
 from mycode.tools.registry import ToolRegistry, create_default_registry
+from mycode.hooks.models import HookDispatchResult
 from mycode.types import ToolCall, ToolContext, ToolResult, ToolSpec
 
 
@@ -23,6 +24,11 @@ class AllowPermissions:
         return PermissionDecision(True, "test_allow", "allowed", call.name)
 
 
+class DenyPermissions:
+    def authorize(self, call: ToolCall, context: ToolContext) -> PermissionDecision:
+        return PermissionDecision(False, "test_deny", "denied", call.name)
+
+
 class RecordingApproval:
     def __init__(self) -> None:
         self.calls = []
@@ -30,6 +36,22 @@ class RecordingApproval:
     def request(self, approval):
         self.calls.append(approval)
         return "deny"
+
+
+class RecordingHooks:
+    def __init__(self, denied_ids: set[str] | None = None) -> None:
+        self.denied_ids = denied_ids or set()
+        self.before: list[str] = []
+        self.after: list[tuple[str, str]] = []
+
+    def before_tool(self, call: ToolCall) -> HookDispatchResult:
+        self.before.append(call.id)
+        if call.id in self.denied_ids:
+            return HookDispatchResult(True, f"blocked-{call.id}")
+        return HookDispatchResult()
+
+    def after_tool(self, call, result, source) -> None:
+        self.after.append((call.id, source))
 
 
 def test_cancellation_token_is_idempotent() -> None:
@@ -230,3 +252,93 @@ def test_executor_stops_when_cancelled(tmp_path: Path) -> None:
     events = list(BatchToolExecutor(create_default_registry(), context(tmp_path), AllowPermissions()).execute_batches([batch], token))
 
     assert events == []
+
+
+def test_hook_denial_skips_tool_start_permission_and_execution(tmp_path: Path) -> None:
+    record: list[str] = []
+    registry = ToolRegistry()
+    registry.register(RecordingTool("write_file", record))
+
+    class CountingPermissions(AllowPermissions):
+        calls = 0
+
+        def authorize(self, call, tool_context):
+            self.calls += 1
+            return super().authorize(call, tool_context)
+
+    permissions = CountingPermissions()
+    hooks = RecordingHooks({"1"})
+    batch = ToolBatch(
+        safety="side_effect",
+        calls=(
+            ToolCall("1", "write_file", {}),
+            ToolCall("2", "write_file", {}),
+        ),
+    )
+
+    events = list(
+        BatchToolExecutor(registry, context(tmp_path), permissions, hooks).execute_batches(
+            [batch], CancellationToken()
+        )
+    )
+
+    starts = [item.tool_call_id for item in events if isinstance(item, AgentEvent) and item.type == "tool_call_started"]
+    results = [item for item in events if isinstance(item, tuple)]
+    assert starts == ["2"]
+    assert permissions.calls == 1
+    assert record == ["write_file"]
+    assert not results[0][1].ok and results[0][1].message == "blocked-1"
+    assert hooks.before == ["1", "2"]
+    assert hooks.after == [("1", "hook"), ("2", "tool")]
+
+
+def test_tool_after_sources_cover_validation_and_permission(tmp_path: Path) -> None:
+    hooks = RecordingHooks()
+    unknown = ToolBatch(
+        safety="side_effect",
+        calls=(ToolCall("unknown", "missing", {}),),
+    )
+    list(
+        BatchToolExecutor(
+            create_default_registry(), context(tmp_path), AllowPermissions(), hooks
+        ).execute_batches([unknown], CancellationToken())
+    )
+
+    hooks_denied = RecordingHooks()
+    denied = ToolBatch(
+        safety="side_effect",
+        calls=(ToolCall("denied", "run_command", {"command": "echo ok"}),),
+    )
+    list(
+        BatchToolExecutor(
+            create_default_registry(), context(tmp_path), DenyPermissions(), hooks_denied
+        ).execute_batches([denied], CancellationToken())
+    )
+
+    assert hooks.after == [("unknown", "validation")]
+    assert hooks_denied.after == [("denied", "permission")]
+
+
+def test_read_hook_after_order_is_original_even_when_completion_order_differs(tmp_path: Path) -> None:
+    record: list[str] = []
+    release_first = Event()
+    registry = ToolRegistry()
+    registry.register(CoordinatedReadTool("read_file", record, release_first))
+    registry.register(CoordinatedReadTool("find_files", record, release_first))
+    hooks = RecordingHooks()
+    batch = ToolBatch(
+        safety="read",
+        calls=(
+            ToolCall("1", "read_file", {}),
+            ToolCall("2", "find_files", {}),
+        ),
+    )
+
+    list(
+        BatchToolExecutor(registry, context(tmp_path), AllowPermissions(), hooks).execute_batches(
+            [batch], CancellationToken()
+        )
+    )
+
+    assert hooks.before == ["1", "2"]
+    assert hooks.after == [("1", "tool"), ("2", "tool")]

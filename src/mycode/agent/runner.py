@@ -1,9 +1,10 @@
 from __future__ import annotations
 
 import json
-from collections.abc import Iterator, Sequence
-from dataclasses import asdict
+from collections.abc import Callable, Iterator, Sequence
+from dataclasses import asdict, replace
 from datetime import date
+from typing import TYPE_CHECKING
 
 from mycode.agent.cancellation import CancellationToken
 from mycode.agent.collector import CollectedResponse, StreamCollector
@@ -33,6 +34,62 @@ from mycode.tools.descriptions import reinforce_tool_specs
 from mycode.types import ContextConfig, Message, ProviderError, ToolCall, ToolContext, ToolExecutionResult, ToolResult
 from mycode.tools.registry import ToolRegistry
 
+if TYPE_CHECKING:
+    from mycode.hooks.runtime import HookRuntime
+
+
+_STRUCTURED_HOOK_ERRORS = {
+    "stream_error",
+    "tool_parse_error",
+    "context_overflow",
+    "session_error",
+    "internal_error",
+}
+
+
+class _RequestInstructionLease:
+    def __init__(
+        self,
+        instructions: Sequence[DynamicInstruction] = (),
+        *,
+        refresh: Callable[[], Sequence[DynamicInstruction]] | None = None,
+        commit: Callable[[], None] | None = None,
+        release: Callable[[], None] | None = None,
+    ) -> None:
+        self.instructions = tuple(instructions)
+        self._refresh = refresh
+        self._commit = commit
+        self._release = release
+        self._settled = False
+
+    def refresh(self) -> tuple[DynamicInstruction, ...]:
+        if self._refresh is not None and not self._settled:
+            try:
+                self.instructions = tuple(self._refresh())
+            except Exception:  # noqa: BLE001 - Hook lease 不得影响请求。
+                pass
+        return self.instructions
+
+    def commit(self) -> None:
+        if self._settled:
+            return
+        try:
+            if self._commit is not None:
+                self._commit()
+        except Exception:  # noqa: BLE001 - Hook lease 不得影响 Provider 调用。
+            return
+        self._settled = True
+
+    def release(self) -> None:
+        if self._settled:
+            return
+        try:
+            if self._release is not None:
+                self._release()
+        except Exception:  # noqa: BLE001 - Hook lease 不得影响 Agent 清理。
+            pass
+        self._settled = True
+
 
 class AgentRunner:
     def __init__(
@@ -51,6 +108,10 @@ class AgentRunner:
         time_gap_reminder: str = "",
         skill_runtime: SkillRuntime | None = None,
         isolated_skill_executor: IsolatedSkillExecutor | None = None,
+        hook_runtime: HookRuntime | None = None,
+        initial_dynamic_instructions: Sequence[DynamicInstruction] = (),
+        on_initial_instructions_commit: Callable[[], None] | None = None,
+        on_initial_instructions_release: Callable[[], None] | None = None,
     ) -> None:
         self.provider = provider
         self.full_registry = full_registry
@@ -73,6 +134,11 @@ class AgentRunner:
         self._last_request: AgentRequest | None = None
         self.skill_runtime = skill_runtime
         self.isolated_skill_executor = isolated_skill_executor
+        self.hook_runtime = hook_runtime
+        self._initial_dynamic_instructions = tuple(initial_dynamic_instructions)
+        self._initial_instructions_pending = bool(self._initial_dynamic_instructions)
+        self._on_initial_instructions_commit = on_initial_instructions_commit
+        self._on_initial_instructions_release = on_initial_instructions_release
         self._current_request: AgentRequest | None = None
         self._current_cancellation: CancellationToken | None = None
         if self.skill_runtime is not None and not self.full_registry.contains("load_skill"):
@@ -88,12 +154,48 @@ class AgentRunner:
         cancellation: CancellationToken | None = None,
     ) -> Iterator[AgentEvent]:
         cancellation = cancellation or CancellationToken()
+        yield from self._run_with_lifecycle(
+            request,
+            cancellation,
+            "message",
+            lambda: self._run_loop(request, cancellation),
+        )
+
+    def _run_with_lifecycle(
+        self,
+        request: AgentRequest,
+        cancellation: CancellationToken,
+        input_kind: str,
+        operation: Callable[[], Iterator[AgentEvent]],
+    ) -> Iterator[AgentEvent]:
         self._last_request = request
         self._current_request = request
         self._current_cancellation = cancellation
+        stop_reason = "internal_error"
+        self._hook_call("begin_turn", request.mode, input_kind)
+        self._hook_call("message_received", request.text)
         try:
-            yield from self._run_loop(request, cancellation)
+            for event in operation():
+                if (
+                    event.type == "error"
+                    and event.stop_reason in _STRUCTURED_HOOK_ERRORS
+                ):
+                    self._hook_call(
+                        "agent_error",
+                        event.stop_reason,
+                        event.message or event.text,
+                    )
+                if event.type == "done" and event.stop_reason is not None:
+                    stop_reason = event.stop_reason
+                yield event
+        except GeneratorExit:
+            stop_reason = "cancelled" if cancellation.is_cancelled() else "internal_error"
+            raise
+        except Exception as exc:
+            self._hook_call("agent_error", "internal_error", type(exc).__name__)
+            raise
         finally:
+            self._hook_call("end_turn", stop_reason)
             self._current_request = None
             self._current_cancellation = None
 
@@ -118,29 +220,43 @@ class AgentRunner:
                 return
 
             yield progress_event(iteration, self.config.max_iterations, f"iteration {iteration}/{self.config.max_iterations}")
+            instruction_lease = self._reserve_request_instructions()
             try:
-                registry = self._registry_for_request(request)
-                template = self._chat_request_template(request, registry, iteration)
-                prepared = self.context_manager.prepare_request(template)
-                if prepared.report.status != "not_needed":
-                    yield AgentEvent(type="context_status", context_report=prepared.report)
-                if not prepared.allowed:
-                    message = (
-                        f"上下文估算 {prepared.report.after_tokens} token，"
-                        f"预算 {prepared.report.budget_tokens} token；{prepared.report.reason} "
-                        "请执行 /compact 重试，或使用 /new 开始新会话。"
-                    )
-                    yield AgentEvent(type="error", stop_reason="context_overflow", message=message)
-                    yield done_event("context_overflow", message, iteration, self.config.max_iterations)
+                try:
+                    registry = self._registry_for_request(request)
+                    base_template = self._chat_request_template(request, registry, iteration)
+                    template = _append_dynamic(base_template, instruction_lease.instructions)
+                    prepared = self.context_manager.prepare_request(template)
+                    if prepared.report.status == "success":
+                        self._hook_call("context_compacted", prepared.report)
+                        refreshed = instruction_lease.refresh()
+                        refreshed_template = _append_dynamic(base_template, refreshed)
+                        prepared = self.context_manager.rebuild_prepared_request(
+                            refreshed_template,
+                            prepared.report,
+                        )
+                    if prepared.report.status != "not_needed":
+                        yield AgentEvent(type="context_status", context_report=prepared.report)
+                    if not prepared.allowed:
+                        message = (
+                            f"上下文估算 {prepared.report.after_tokens} token，"
+                            f"预算 {prepared.report.budget_tokens} token；{prepared.report.reason} "
+                            "请执行 /compact 重试，或使用 /new 开始新会话。"
+                        )
+                        yield AgentEvent(type="error", stop_reason="context_overflow", message=message)
+                        yield done_event("context_overflow", message, iteration, self.config.max_iterations)
+                        return
+                    chat_request = prepared.request
+                    self._time_gap_reminder = ""
+                    instruction_lease.commit()
+                    provider_events = self.provider.stream_chat(chat_request)
+                    collected = yield from self._collect_provider_response(provider_events)
+                except ProviderError as exc:
+                    yield AgentEvent(type="error", stop_reason="stream_error", message=exc.user_message)
+                    yield done_event("stream_error", exc.user_message, iteration, self.config.max_iterations)
                     return
-                chat_request = prepared.request
-                self._time_gap_reminder = ""
-                provider_events = self.provider.stream_chat(chat_request)
-                collected = yield from self._collect_provider_response(provider_events)
-            except ProviderError as exc:
-                yield AgentEvent(type="error", stop_reason="stream_error", message=exc.user_message)
-                yield done_event("stream_error", exc.user_message, iteration, self.config.max_iterations)
-                return
+            finally:
+                instruction_lease.release()
 
             self.context_manager.record_usage(chat_request, collected.token_usage)
 
@@ -153,6 +269,7 @@ class AgentRunner:
             assistant_parts.append(collected.assistant_text)
 
             if not collected.tool_calls:
+                self._hook_call("message_sent", collected.assistant_text)
                 try:
                     self._append_message(Message(role="assistant", content=collected.assistant_text))
                 except SessionError as exc:
@@ -174,7 +291,12 @@ class AgentRunner:
 
             batches = ToolBatcher().batch(collected.tool_calls)
             tool_results: list[tuple[str, ToolExecutionResult]] = []
-            batch_executor = BatchToolExecutor(registry, self.tool_context, self.permission_service)
+            batch_executor = BatchToolExecutor(
+                registry,
+                self.tool_context,
+                self.permission_service,
+                self.hook_runtime,
+            )
             for item in batch_executor.execute_batches(batches, cancellation):
                 if isinstance(item, AgentEvent):
                     yield item
@@ -244,11 +366,27 @@ class AgentRunner:
         mode: PromptMode = "default",
         cancellation: CancellationToken | None = None,
     ) -> Iterator[AgentEvent]:
+        cancellation = cancellation or CancellationToken()
+        user_message = f"使用 Skill `{name}`。\n\nSkill 输入：\n{input_text}"
+        request = AgentRequest(text=user_message, mode=mode)
+        yield from self._run_with_lifecycle(
+            request,
+            cancellation,
+            "skill",
+            lambda: self._invoke_skill_loop(name, input_text, mode, cancellation),
+        )
+
+    def _invoke_skill_loop(
+        self,
+        name: str,
+        input_text: str,
+        mode: PromptMode,
+        cancellation: CancellationToken,
+    ) -> Iterator[AgentEvent]:
         if self.skill_runtime is None:
             yield AgentEvent(type="error", stop_reason="skill_failed", message="Skill 运行时未启用。")
             yield done_event("skill_failed", "Skill 运行时未启用。")
             return
-        cancellation = cancellation or CancellationToken()
         try:
             definition = self.skill_runtime.definition(name)
         except SkillValidationError as exc:
@@ -259,7 +397,7 @@ class AgentRunner:
         user_message = _skill_user_message(definition, input_text)
         if definition.mode == "shared":
             self.skill_runtime.activate_shared(name)
-            yield from self.run(AgentRequest(text=user_message, mode=mode), cancellation)
+            yield from self._run_loop(AgentRequest(text=user_message, mode=mode), cancellation)
             return
 
         result = self._run_isolated_skill(
@@ -267,6 +405,8 @@ class AgentRunner:
             definition,
             cancellation,
         )
+        if result.summary:
+            self._hook_call("message_sent", result.summary)
         try:
             self.append_external_turn(user_message, result.summary)
         except SessionError as exc:
@@ -293,7 +433,10 @@ class AgentRunner:
             request = AgentRequest(text=request.text, mode=mode)
         registry = self._registry_for_request(request)
         template = self._chat_request_template(request, registry, 1)
-        return self.context_manager.compact(template)
+        report = self.context_manager.compact(template)
+        if report.status == "success":
+            self._hook_call("context_compacted", report)
+        return report
 
     def context_status(self, mode: PromptMode = "default") -> ContextStatus:
         request = AgentRequest(text="", mode=mode)
@@ -303,6 +446,7 @@ class AgentRunner:
 
     def close(self) -> str | None:
         warnings: list[str] = []
+        self._release_initial_instructions()
         if self.memory_worker is not None:
             warnings.extend(
                 notice.message for notice in self.memory_worker.drain(5.0) if notice.code != "updated"
@@ -341,6 +485,51 @@ class AgentRunner:
         if self.memory_worker is None:
             return ()
         return self.memory_worker.take_notices()
+
+    def _reserve_request_instructions(self) -> _RequestInstructionLease:
+        if self.hook_runtime is not None:
+            try:
+                lease = self.hook_runtime.reserve_prompts()
+            except Exception:  # noqa: BLE001 - Hook lease 不得影响请求。
+                return _RequestInstructionLease()
+            return _RequestInstructionLease(
+                lease.instructions,
+                refresh=lambda: self.hook_runtime.refresh_prompt_lease(lease.lease_id).instructions,
+                commit=lambda: self.hook_runtime.commit_prompt_lease(lease.lease_id),
+                release=lambda: self.hook_runtime.release_prompt_lease(lease.lease_id),
+            )
+        if self._initial_instructions_pending:
+            return _RequestInstructionLease(
+                self._initial_dynamic_instructions,
+                commit=self._commit_initial_instructions,
+                release=self._release_initial_instructions,
+            )
+        return _RequestInstructionLease()
+
+    def _commit_initial_instructions(self) -> None:
+        if not self._initial_instructions_pending:
+            return
+        if self._on_initial_instructions_commit is not None:
+            self._on_initial_instructions_commit()
+        self._initial_instructions_pending = False
+
+    def _release_initial_instructions(self) -> None:
+        if not self._initial_instructions_pending:
+            return
+        if self._on_initial_instructions_release is not None:
+            try:
+                self._on_initial_instructions_release()
+            except Exception:  # noqa: BLE001 - 清理回调不得影响 Agent。
+                pass
+        self._initial_instructions_pending = False
+
+    def _hook_call(self, method: str, *args) -> None:
+        if self.hook_runtime is None:
+            return
+        try:
+            getattr(self.hook_runtime, method)(*args)
+        except Exception:  # noqa: BLE001 - Hook 生命周期必须与 Agent 隔离。
+            pass
 
     def _chat_request_template(self, request: AgentRequest, registry: ToolRegistry, iteration: int) -> ChatRequest:
         environment = EnvironmentInfo(
@@ -466,7 +655,55 @@ class AgentRunner:
 
             return IsolatedSkillResult(status="failed", summary="独立 Skill 执行器未配置。")
         history = self.context_manager.recent_complete_turns(definition.history or 0)
-        return self.isolated_skill_executor.run(invocation, definition, history, cancellation)
+        if self.hook_runtime is None:
+            return self.isolated_skill_executor.run(
+                invocation,
+                definition,
+                history,
+                cancellation,
+            )
+
+        try:
+            lease = self.hook_runtime.reserve_prompts()
+        except Exception:  # noqa: BLE001 - Hook lease 不得阻断 Skill。
+            return self.isolated_skill_executor.run(
+                invocation,
+                definition,
+                history,
+                cancellation,
+            )
+        settled = False
+
+        def commit() -> None:
+            nonlocal settled
+            if settled:
+                return
+            self.hook_runtime.commit_prompt_lease(lease.lease_id)
+            settled = True
+
+        def release() -> None:
+            nonlocal settled
+            if settled:
+                return
+            self.hook_runtime.release_prompt_lease(lease.lease_id)
+            settled = True
+
+        try:
+            return self.isolated_skill_executor.run(
+                invocation,
+                definition,
+                history,
+                cancellation,
+                dynamic_instructions=lease.instructions,
+                on_instructions_commit=commit,
+                on_instructions_release=release,
+            )
+        finally:
+            if not settled:
+                try:
+                    release()
+                except Exception:  # noqa: BLE001 - Hook lease 不得覆盖 Skill 结果。
+                    pass
 
 
 def _is_unknown_tool_result(result: ToolResult) -> bool:
@@ -475,3 +712,15 @@ def _is_unknown_tool_result(result: ToolResult) -> bool:
 
 def _skill_user_message(definition: SkillDefinition, input_text: str) -> str:
     return f"使用 Skill `{definition.name}`。\n\nSkill 输入：\n{input_text}"
+
+
+def _append_dynamic(
+    request: ChatRequest,
+    instructions: Sequence[DynamicInstruction],
+) -> ChatRequest:
+    if not instructions:
+        return request
+    return replace(
+        request,
+        dynamic_system_messages=(*request.dynamic_system_messages, *instructions),
+    )

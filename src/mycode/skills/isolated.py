@@ -10,6 +10,7 @@ from mycode.instructions import InstructionBundle
 from mycode.permissions.service import PermissionService
 from mycode.providers.base import LLMProvider
 from mycode.providers.factory import create_provider
+from mycode.prompts.modes import DynamicInstruction
 from mycode.tool_safety import SYSTEM_TOOLS
 from mycode.tools.registry import ToolRegistry
 from mycode.types import AppConfig, Message, TokenUsage, ToolContext
@@ -55,8 +56,31 @@ class IsolatedSkillRunner:
         definition: SkillDefinition,
         history: Sequence[Message],
         cancellation: CancellationToken,
+        *,
+        dynamic_instructions: Sequence[DynamicInstruction] = (),
+        on_instructions_commit: Callable[[], None] | None = None,
+        on_instructions_release: Callable[[], None] | None = None,
     ) -> IsolatedSkillResult:
+        instructions_settled = False
+
+        def commit_instructions() -> None:
+            nonlocal instructions_settled
+            if instructions_settled:
+                return
+            if on_instructions_commit is not None:
+                on_instructions_commit()
+            instructions_settled = True
+
+        def release_instructions() -> None:
+            nonlocal instructions_settled
+            if instructions_settled:
+                return
+            if on_instructions_release is not None:
+                on_instructions_release()
+            instructions_settled = True
+
         if cancellation.is_cancelled():
+            release_instructions()
             return IsolatedSkillResult("cancelled", "独立 Skill 已取消。")
 
         done_reason: str | None = None
@@ -85,6 +109,9 @@ class IsolatedSkillRunner:
                 restored_messages=tuple(history),
                 skill_runtime=runtime,
                 isolated_skill_executor=self,
+                initial_dynamic_instructions=tuple(dynamic_instructions),
+                on_initial_instructions_commit=commit_instructions,
+                on_initial_instructions_release=release_instructions,
             )
             for event in child.run(
                 AgentRequest(
@@ -118,6 +145,11 @@ class IsolatedSkillRunner:
             if child is not None:
                 try:
                     child.close()
+                except Exception:
+                    pass
+            if not instructions_settled:
+                try:
+                    release_instructions()
                 except Exception:
                     pass
 

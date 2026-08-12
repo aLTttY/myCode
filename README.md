@@ -241,7 +241,7 @@ Mycode 当前提供七个核心工具：
 本地级：<workspace>/.mycode/permissions.local.yaml
 ```
 
-本地文件默认被 Git 忽略。规则优先级为“会话 > 本地 > 项目 > 用户”；同层精确匹配优先于 glob，同类型冲突时 deny 优先。
+本地文件默认被 Git 忽略。规则优先级为“会话 > 本地 > 项目 > 用户”；同层按“精确 > 正则 > glob、deny、声明顺序”选择。
 
 示例：
 
@@ -249,14 +249,16 @@ Mycode 当前提供七个核心工具：
 mode: default
 
 allow:
-  - "run_command(git *)"
+  - "run_command(glob:git *)"
+  - "run_command(re:^python3? -m pytest(?: |$))"
 
 deny:
   - "write_file(.env)"
-  - "run_command(git push *)"
+  - "run_command(glob:git push *)"
+  - "!write_file(glob:docs/*)"
 ```
 
-规则使用真实工具名。`run_command` 匹配完整命令，写入和编辑工具匹配规范化的工作区相对路径。包含 `*`、`?` 或 `[...]` 的模式按大小写敏感 glob 匹配，其余模式精确匹配。四个专用只读工具不使用规则判定。
+规则使用真实工具名。`run_command` 匹配完整命令，写入和编辑工具匹配规范化的工作区相对路径。无前缀模式继续兼容旧行为：包含 `*`、`?` 或 `[...]` 时使用大小写敏感 glob，否则精确匹配。`glob:` 可显式指定 glob，`re:` 使用大小写敏感正则搜索；规则最前面的 `!` 表示反向匹配。四个专用只读工具不使用规则判定。
 
 三档权限模式与 `[DEFAULT]`/`[PLAN]` 交互模式相互独立：
 
@@ -269,6 +271,75 @@ deny:
 交互审批不会写入任何权限文件。需要长期规则时，用户可以手工编辑 `.mycode/permissions.local.yaml`；该文件仍在下次启动时加载，并保持“本地 > 项目 > 用户”的优先级。
 
 危险命令黑名单和路径沙箱不能被配置、权限模式或人工确认覆盖。文件工具会解析符号链接并拒绝项目外路径；命令工具会检查可识别的显式路径。命令通过环境变量、用户配置、运行库或程序内部逻辑产生的隐式文件访问不受本阶段强隔离，完整限制需要后续引入操作系统沙箱或容器。
+
+## 生命周期 Hooks
+
+Hooks 用声明式“事件 + 可选条件 + 动作”在 Agent 生命周期的固定节点执行自动化。配置从以下三层加载，并严格按用户、项目、本地及文件声明顺序触发：
+
+```text
+用户级：~/.mycode/hooks.yaml
+项目级：<workspace>/.mycode/hooks.yaml
+本地级：<workspace>/.mycode/hooks.local.yaml
+```
+
+本地文件默认由 Git 忽略。缺失文件等同空配置；任一层存在重复 YAML key、未知字段、非法正则或不兼容动作时，Mycode 会在连接 Provider/MCP 及执行任何 Hook 前阻止启动，不会加载部分规则。
+
+每条规则必须包含一个 `event` 和一个 `action`，`if` 省略时无条件触发：
+
+```yaml
+hooks:
+  - event: tool_before
+    if:
+      all:
+        - "tool.name(run_command)"
+        - "tool.arguments.command(re:^(rm|sudo)\\s)"
+    action:
+      type: command
+      command: ./scripts/check-tool.sh
+      timeout_seconds: 5
+      once: false
+      async: false
+
+  - event: context_compacted
+    action:
+      type: prompt
+      content: 压缩刚刚发生，请重新核对关键文件后再继续。
+      once: true
+
+  - event: turn_end
+    action:
+      type: http
+      url: https://example.internal/agent-events
+      method: POST
+      headers:
+        Authorization: Bearer static-token
+      async: true
+```
+
+支持十种事件：
+
+- 会话级：`session_start`、`session_end`
+- 轮次级：`turn_start`、`turn_end`
+- 消息级：`message_received`、`message_sent`
+- 工具级：`tool_before`、`tool_after`
+- 系统级：`context_compacted`、`agent_error`
+
+一次完整用户输入只产生一组轮次事件；模型流式增量和内部模型—工具迭代不会重复产生消息或轮次事件。`tool_after` 的 `result.source` 可区分 `tool`、`permission`、`hook` 和 `validation`。只有成功的自动/手动压缩产生 `context_compacted`；普通工具失败、权限/Hook 拒绝、取消和迭代上限不产生 `agent_error`。
+
+条件顶层必须且只能使用一个非空 `all` 或 `any` 列表，不支持嵌套或混用。条件项格式为 `字段(模式)`，使用与权限规则相同的精确、`glob:`、`re:` 和前置 `!` 语法，例如 `!tool.arguments.command(glob:safe/*)`。缺失字段、对象和数组不匹配，即使使用反向模式也不会变成命中。常用字段包括 `event`、`session.id`、`turn.mode`、`message.content`、`tool.name`、`tool.arguments.<路径>`、`result.ok`、`result.source` 和 `result.data.<路径>`；启动校验会拒绝当前事件不可用的字段。
+
+四类动作行为如下：
+
+- `command`：以工作区为 cwd 通过 shell 执行，事件的 schema v1 JSON 从 UTF-8 stdin 输入；`timeout_seconds` 为 0.1–300 秒，默认 10 秒。
+- `http`：把同一 JSON Payload 作为固定 `application/json` body 发送，默认 `POST`，固定 10 秒超时；可配置静态 URL、method 和 headers，但不能覆盖 `Content-Type`。
+- `prompt`：把静态内容注入事件后的下一次真实模型请求，成功提交后立即移除，不进入会话历史；`session_end` 禁止此动作。
+- `agent`：本阶段只校验并记录“尚未实现”，不会创建 Provider、Agent、线程或会话。
+
+command、URL 和 headers 不做事件模板替换，动态数据只能从 JSON Payload 读取。`once: true` 在当前活动会话内成功、拒绝、入队或占位后不再触发；失败、取消和条件未命中不消耗，`/new` 或进程重启后重置。只有 command/HTTP 可设置 `async: true`；所有 `tool_before` 动作都必须同步，后台队列有界且退出时不等待。
+
+`tool_before` 在注册校验、权限和工具启动前执行。command 返回 0 表示放行，返回 2 表示拒绝并使用受限 stderr 作为原因；HTTP 必须返回严格的 `{"decision":"allow"}` 或 `{"decision":"deny","reason":"..."}`。拒绝会停止该工具调用剩余前置规则，并作为失败工具结果回灌模型；allow 不能绕过危险命令、沙箱或权限。其他退出码、超时、网络错误、无效响应及普通 Hook 故障只产生 `[hook]` 诊断并默认继续 Agent 主流程，也不会递归触发 Hook。
+
+Payload 始终包含 `schema_version`、带时区时间、工作区和会话信息；活动轮次及事件专属的消息、工具、结果、压缩或错误字段按需出现。各条件和动作观察同一份只读 Payload。
 
 ## Agent Loop
 

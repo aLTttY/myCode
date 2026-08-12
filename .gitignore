@@ -9,6 +9,7 @@ config.yaml
 .DS_Store
 .idea/
 .mycode/permissions.local.yaml
+.mycode/hooks.local.yaml
 .mycode/context/
 .mycode/sessions/
 .mycode/memory/

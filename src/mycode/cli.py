@@ -29,6 +29,11 @@ from .commands import (
 )
 from .config import load_config
 from .instructions import InstructionLoader
+from .hooks.actions import HookActionExecutor
+from .hooks.config import HookConfigLoader
+from .hooks.events import HookEventFactory
+from .hooks.models import HookDiagnostic, PromptAction
+from .hooks.runtime import HookRuntime
 from .memory import MemoryService, MemoryStore, MemoryWorker
 from .mcp import MCPDiscoveryWarning, MCPManager, MCPManagerError, MCPTool
 from .permissions.approval import TerminalApprovalHandler
@@ -93,12 +98,13 @@ def main(argv: Sequence[str] | None = None) -> int:
         return 1
 
     try:
-        # 加载配置，并根据配置创建对应的大模型 Provider
+        # Hook 必须在 Provider、MCP 和后台服务初始化前完成整体校验。
+        workspace_root = Path.cwd()
         config = load_config(Path(args.config))
+        hook_snapshot = HookConfigLoader().load(workspace_root)
         provider = create_provider(config)
         memory_provider = create_provider(config)
         tool_registry = create_default_registry()
-        workspace_root = Path.cwd()
         mcp_tool_prefixes = tuple(
             f"{server.name}__" for server in config.mcp_servers
         )
@@ -109,6 +115,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     mcp_manager = MCPManager(config.mcp_servers)
     journal = None
     memory_worker = None
+    hook_runtime: HookRuntime | None = None
     try:
         try:
             remote_tools, discovery_warnings = mcp_manager.discover()
@@ -192,6 +199,19 @@ def main(argv: Sequence[str] | None = None) -> int:
             except Exception as exc:
                 print(f"[memory] {scope} 索引协调失败（{type(exc).__name__}）。", file=sys.stderr)
         memory_worker = MemoryWorker(MemoryService(memory_provider, memory_store))
+        if hook_snapshot.rules:
+            needs_executor = any(
+                not isinstance(rule.action, PromptAction) for rule in hook_snapshot.rules
+            )
+            hook_actions = (
+                HookActionExecutor(workspace_root) if needs_executor else None
+            )
+            hook_runtime = HookRuntime(
+                hook_snapshot,
+                HookEventFactory(workspace_root),
+                hook_actions,
+                _print_hook_diagnostic,
+            )
         isolated_skill_runner = IsolatedSkillRunner(
             app_config=config,
             base_registry=tool_registry,
@@ -217,9 +237,13 @@ def main(argv: Sequence[str] | None = None) -> int:
             time_gap_reminder=time_gap_reminder,
             skill_runtime=skill_runtime,
             isolated_skill_executor=isolated_skill_runner,
+            hook_runtime=hook_runtime,
         )
+        exit_reason = "fatal_error"
+        if hook_runtime is not None:
+            hook_runtime.begin_session(journal.session_id, session_origin)
         try:
-            return _run_interactive(
+            exit_reason = _run_interactive(
                 agent,
                 command_registry=command_registry,
                 config=config,
@@ -234,7 +258,10 @@ def main(argv: Sequence[str] | None = None) -> int:
                 skill_runtime=skill_runtime,
                 reserved_commands=reserved_commands,
             )
+            return 0
         finally:
+            if hook_runtime is not None:
+                hook_runtime.end_session(exit_reason)
             close = getattr(agent, "close", None)
             warning = close() if close is not None else None
             if warning:
@@ -245,12 +272,24 @@ def main(argv: Sequence[str] | None = None) -> int:
                 for notice in memory_worker.drain(0):
                     if notice.code != "updated":
                         print(f"[memory] {notice.message}", file=sys.stderr)
+            if hook_runtime is not None:
+                hook_runtime.close()
     except (ConfigError, SkillCatalogError, CommandRegistrationError, ToolError) as exc:
         message = getattr(exc, "user_message", str(exc))
         print(f"Skill 启动错误：{message}", file=sys.stderr)
         return 1
     finally:
+        if hook_runtime is not None:
+            hook_runtime.close()
         mcp_manager.close()
+
+
+def _print_hook_diagnostic(diagnostic: HookDiagnostic) -> None:
+    print(
+        f"[hook] {diagnostic.source_path}:{diagnostic.source_index} "
+        f"{diagnostic.event} {diagnostic.code}: {diagnostic.message}",
+        file=sys.stderr,
+    )
 
 
 class TerminalCommandUI:
@@ -412,7 +451,18 @@ class TerminalCommandUI:
                 "[session] 当前 Agent 不支持新建会话。", error=True
             )
             return
+        hook_runtime = getattr(self.agent, "hook_runtime", None)
+        if hook_runtime is not None:
+            try:
+                hook_runtime.end_session("switched")
+            except Exception:
+                pass
         session_id, warnings = switch()
+        if hook_runtime is not None:
+            try:
+                hook_runtime.begin_session(session_id, "new")
+            except Exception:
+                pass
         self._session_origin = "new"
         self._last_token_usage = None
         self.display_message(f"[session] 新会话 {session_id}")
@@ -455,7 +505,7 @@ def _run_interactive(
     skill_catalog: SkillCatalog | None = None,
     skill_runtime: SkillRuntime | None = None,
     reserved_commands: tuple[str, ...] = (),
-) -> int:
+) -> str:
     global _ACTIVE_PROMPT_SESSION
 
     ui = TerminalCommandUI(
@@ -492,10 +542,10 @@ def _run_interactive(
                 raw_text = read_user_input("> ")
             except KeyboardInterrupt:
                 print("\n已退出。")
-                return 0
+                return "interrupt"
             except EOFError:
                 print()
-                return 0
+                return "eof"
 
             if skill_catalog is not None and skill_runtime is not None:
                 active_registry = getattr(agent, "full_registry", None)
@@ -514,7 +564,7 @@ def _run_interactive(
                 continue
             if route.kind == "exit":
                 print("已退出。")
-                return 0
+                return "exit"
             if route.kind == "error":
                 ui.display_message(route.message, error=True)
                 continue
@@ -632,6 +682,12 @@ def _render_agent_events(agent, events, cancellation, on_token_usage) -> None:
         _print_memory_notices(agent)
     except KeyboardInterrupt:
         cancellation.cancel()
+        close = getattr(events, "close", None)
+        if close is not None:
+            try:
+                close()
+            except Exception:
+                pass
         print("\n已取消。")
     except ProviderError as exc:
         print(f"请求错误：{exc.user_message}", file=sys.stderr)

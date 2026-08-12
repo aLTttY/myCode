@@ -1,12 +1,16 @@
 from __future__ import annotations
 
 from collections.abc import Iterator, Sequence
+from dataclasses import replace
 from pathlib import Path
 
 from mycode.agent.cancellation import CancellationToken
 from mycode.agent.config import AgentConfig, AgentRequest
 from mycode.agent.runner import AgentRunner
-from mycode.context.models import CompactionReport
+from mycode.context.models import CompactionReport, PreparedContext
+from mycode.hooks.events import HookEventFactory
+from mycode.hooks.models import HookPromptLease, HookRule, HookSnapshot, PromptAction
+from mycode.hooks.runtime import HookRuntime
 from mycode.permissions.service import PermissionService
 from mycode.providers.base import ChatRequest, LLMProvider
 from mycode.skills.models import (
@@ -94,8 +98,20 @@ class RecordingIsolatedExecutor:
         self.result = result or IsolatedSkillResult("completed", "isolated summary")
         self.calls: list[tuple[SkillInvocation, SkillDefinition, Sequence[Message]]] = []
 
-    def run(self, invocation, definition, history, cancellation):
+    def run(
+        self,
+        invocation,
+        definition,
+        history,
+        cancellation,
+        *,
+        dynamic_instructions=(),
+        on_instructions_commit=None,
+        on_instructions_release=None,
+    ):
         self.calls.append((invocation, definition, history))
+        if on_instructions_commit is not None:
+            on_instructions_commit()
         return self.result
 
 
@@ -442,3 +458,213 @@ def test_new_session_clears_shared_skill_activation(tmp_path: Path) -> None:
     agent.new_session()
 
     assert runtime.active_names() == ()
+
+
+class RecordingHookLifecycle:
+    def __init__(self) -> None:
+        self.events = []
+        self._lease = 0
+
+    def begin_turn(self, mode, input_kind):
+        self.events.append(("turn_start", mode, input_kind))
+
+    def message_received(self, content):
+        self.events.append(("message_received", content))
+
+    def message_sent(self, content):
+        self.events.append(("message_sent", content))
+
+    def end_turn(self, reason):
+        self.events.append(("turn_end", reason))
+
+    def agent_error(self, code, message):
+        self.events.append(("agent_error", code, message))
+
+    def before_tool(self, call):
+        from mycode.hooks.models import HookDispatchResult
+
+        self.events.append(("tool_before", call.id))
+        return HookDispatchResult()
+
+    def after_tool(self, call, result, source):
+        self.events.append(("tool_after", call.id, source))
+
+    def context_compacted(self, report):
+        self.events.append(("context_compacted", report.status))
+
+    def reserve_prompts(self):
+        self._lease += 1
+        return HookPromptLease(f"lease-{self._lease}", ())
+
+    def refresh_prompt_lease(self, lease_id):
+        return HookPromptLease(lease_id, ())
+
+    def commit_prompt_lease(self, lease_id):
+        return None
+
+    def release_prompt_lease(self, lease_id):
+        return None
+
+
+def test_main_lifecycle_wraps_multiple_model_tool_iterations_once(tmp_path: Path) -> None:
+    (tmp_path / "a.txt").write_text("hello", encoding="utf-8")
+    hooks = RecordingHookLifecycle()
+    provider = ScriptedProvider(
+        [
+            tool_call_events("1", "read_file", '{"path":"a.txt"}'),
+            [StreamEvent(type="text_delta", text="done"), StreamEvent(type="message_done")],
+        ]
+    )
+    agent = AgentRunner(
+        provider,
+        create_default_registry(),
+        ToolContext(workspace_root=tmp_path),
+        permission_service=PermissionService.with_mode("allow"),
+        hook_runtime=hooks,  # type: ignore[arg-type]
+    )
+
+    list(agent.run(AgentRequest("read it")))
+
+    assert hooks.events == [
+        ("turn_start", "default", "message"),
+        ("message_received", "read it"),
+        ("tool_before", "1"),
+        ("tool_after", "1", "tool"),
+        ("message_sent", "done"),
+        ("turn_end", "completed"),
+    ]
+
+
+def test_structured_agent_error_is_emitted_once_before_turn_end(tmp_path: Path) -> None:
+    hooks = RecordingHookLifecycle()
+    agent = AgentRunner(
+        BrokenProvider(),
+        create_default_registry(),
+        ToolContext(workspace_root=tmp_path),
+        permission_service=PermissionService.with_mode("allow"),
+        hook_runtime=hooks,  # type: ignore[arg-type]
+    )
+
+    list(agent.run(AgentRequest("broken")))
+
+    assert [item[0] for item in hooks.events] == [
+        "turn_start",
+        "message_received",
+        "agent_error",
+        "turn_end",
+    ]
+    assert hooks.events[-2][1] == "stream_error"
+    assert hooks.events[-1] == ("turn_end", "stream_error")
+
+
+def prompt_rule(index: int, event: str, content: str) -> HookRule:
+    return HookRule(  # type: ignore[arg-type]
+        rule_id=f"project:{index}",
+        source="project",
+        source_path=Path("/workspace/.mycode/hooks.yaml"),
+        source_index=index,
+        event=event,
+        condition=None,
+        action=PromptAction(content),
+    )
+
+
+def test_hook_prompts_are_consumed_by_next_provider_request_only(tmp_path: Path) -> None:
+    (tmp_path / "a.txt").write_text("hello", encoding="utf-8")
+    hooks = HookRuntime(
+        HookSnapshot(
+            (
+                prompt_rule(1, "turn_start", "first request only"),
+                prompt_rule(2, "tool_after", "second request only"),
+            )
+        ),
+        HookEventFactory(tmp_path),
+    )
+    hooks.begin_session("s1", "new")
+    provider = ScriptedProvider(
+        [
+            tool_call_events("1", "read_file", '{"path":"a.txt"}'),
+            [StreamEvent(type="text_delta", text="done"), StreamEvent(type="message_done")],
+        ]
+    )
+    agent = AgentRunner(
+        provider,
+        create_default_registry(),
+        ToolContext(workspace_root=tmp_path),
+        permission_service=PermissionService.with_mode("allow"),
+        hook_runtime=hooks,
+    )
+
+    list(agent.run(AgentRequest("read it")))
+
+    first_dynamic = "\n".join(item.content for item in provider.calls[0].dynamic_system_messages)
+    second_dynamic = "\n".join(item.content for item in provider.calls[1].dynamic_system_messages)
+    assert "first request only" in first_dynamic and "first request only" not in second_dynamic
+    assert "second request only" not in first_dynamic and "second request only" in second_dynamic
+    assert all("request only" not in message.content for message in agent.messages)
+
+
+def test_auto_compaction_prompt_refreshes_current_request_without_recompacting(tmp_path: Path) -> None:
+    hooks = HookRuntime(
+        HookSnapshot(
+            (
+                prompt_rule(1, "turn_start", "before compact"),
+                prompt_rule(2, "context_compacted", "after compact"),
+            )
+        ),
+        HookEventFactory(tmp_path),
+    )
+    hooks.begin_session("s1", "new")
+    provider = ScriptedProvider(
+        [[StreamEvent(type="text_delta", text="done"), StreamEvent(type="message_done")]]
+    )
+    agent = AgentRunner(
+        provider,
+        create_default_registry(),
+        ToolContext(workspace_root=tmp_path),
+        permission_service=PermissionService.with_mode("allow"),
+        hook_runtime=hooks,
+    )
+    prepare_calls = 0
+
+    def prepared(template):
+        nonlocal prepare_calls
+        prepare_calls += 1
+        return PreparedContext(
+            True,
+            replace(template, messages=agent.messages),
+            CompactionReport("success", "automatic", 100, 50, 100_000),
+        )
+
+    agent.context_manager.prepare_request = prepared  # type: ignore[method-assign]
+
+    list(agent.run(AgentRequest("hello")))
+
+    dynamic = "\n".join(item.content for item in provider.calls[0].dynamic_system_messages)
+    assert prepare_calls == 1
+    assert "before compact" in dynamic
+    assert "after compact" in dynamic
+
+
+def test_context_overflow_releases_prompt_lease_when_provider_not_called(tmp_path: Path) -> None:
+    hooks = HookRuntime(
+        HookSnapshot((prompt_rule(1, "turn_start", "keep me"),)),
+        HookEventFactory(tmp_path),
+    )
+    hooks.begin_session("s1", "new")
+    provider = ScriptedProvider([[StreamEvent(type="message_done")]])
+    agent = AgentRunner(
+        provider,
+        create_default_registry(),
+        ToolContext(workspace_root=tmp_path),
+        permission_service=PermissionService.with_mode("allow"),
+        context_config=ContextConfig(window_tokens=1),
+        hook_runtime=hooks,
+    )
+
+    list(agent.run(AgentRequest("too large")))
+
+    lease = hooks.reserve_prompts()
+    assert provider.calls == []
+    assert [item.content for item in lease.instructions] == ["keep me"]
+    hooks.release_prompt_lease(lease.lease_id)

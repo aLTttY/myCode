@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from threading import RLock
 
+from mycode.matching import parse_match_pattern
 from mycode.tool_safety import is_read_tool, is_system_tool
 from mycode.types import ToolCall, ToolContext
 
@@ -121,10 +122,9 @@ class PermissionService:
 
             rule = PermissionRule(
                 tool=request.tool,
-                pattern=request.target,
+                matcher=parse_match_pattern(request.target),
                 effect="allow",
                 source="session" if choice == "allow_session" else "local",
-                match_type="exact",
             )
             if choice == "allow_session":
                 if rule not in self._session_rules:

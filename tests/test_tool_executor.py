@@ -45,13 +45,14 @@ def test_default_executor_runs_read_tool_without_approval(tmp_path: Path) -> Non
 
 
 def test_executor_wraps_unknown_tool(tmp_path: Path) -> None:
-    result = ToolExecutor(create_default_registry(), context(tmp_path), AllowPermissions()).execute(
-        ToolCall(id="1", name="missing", arguments={})
-    )
+    executor = ToolExecutor(create_default_registry(), context(tmp_path), AllowPermissions())
+    record = executor.execute_record(ToolCall(id="1", name="missing", arguments={}))
+    result = record.result
 
     assert result.ok is False
     assert "未知工具" in result.message
     assert result.display is result.complete
+    assert record.source == "validation"
 
 
 class BrokenTool:
@@ -109,13 +110,26 @@ def test_permission_denial_does_not_call_tool(tmp_path: Path) -> None:
 
     registry = ToolRegistry()
     registry.register(RecordingTool())
-    result = ToolExecutor(registry, context(tmp_path), DenyPermissions()).execute(
+    record_result = ToolExecutor(registry, context(tmp_path), DenyPermissions()).execute_record(
         ToolCall(id="1", name="record", arguments={})
     )
+    result = record_result.result
 
     assert not result.ok
+    assert record_result.source == "permission"
     assert result.data["permission_reason"] == "rule_deny"
     assert record == []
+
+
+def test_tool_success_and_failure_records_keep_tool_source(tmp_path: Path) -> None:
+    registry = ToolRegistry()
+    registry.register(BrokenTool())
+    executor = ToolExecutor(registry, context(tmp_path), AllowPermissions())
+
+    failure = executor.execute_record(ToolCall(id="1", name="broken", arguments={}))
+
+    assert failure.source == "tool"
+    assert not failure.result.ok
 
 
 def test_permission_denial_redacts_sensitive_target(tmp_path: Path) -> None:

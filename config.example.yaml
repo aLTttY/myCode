@@ -59,3 +59,37 @@ mcp_servers:
 # read_file、find_files、search_code 通过工作区校验后直接执行，不参与规则或审批。
 # default 模式对受控工具使用方向键菜单，仅支持不同意、仅本次同意、本会话同意。
 # 交互审批不会持久化；长期规则请手工写入 permissions.local.yaml。
+
+# 生命周期 Hook 与 Provider 配置分开存放：
+#   用户级：~/.mycode/hooks.yaml
+#   项目级：<workspace>/.mycode/hooks.yaml
+#   本地级：<workspace>/.mycode/hooks.local.yaml
+# hooks.yaml 示例（以下内容应写入上述独立文件，而不是 config.yaml）：
+# hooks:
+#   - event: tool_before
+#     if:
+#       all:
+#         - "tool.name(run_command)"
+#         - "tool.arguments.command(re:^(rm|sudo)\\s)"
+#     action:
+#       type: command
+#       command: ./scripts/check-tool.sh
+#       timeout_seconds: 5
+#       once: false
+#       async: false
+#
+#   - event: context_compacted
+#     action:
+#       type: prompt
+#       content: 压缩后先重新核对关键文件。
+#       once: true
+#
+#   - event: turn_end
+#     action:
+#       type: http
+#       url: https://example.internal/agent-events
+#       method: POST
+#       async: true
+#
+# agent 动作本阶段只保留占位，不会启动子 Agent。tool_before 禁止异步；
+# command 默认超时 10 秒，HTTP 固定超时 10 秒。条件支持 exact、glob:、re: 和前置 !。

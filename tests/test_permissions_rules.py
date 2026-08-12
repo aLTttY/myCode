@@ -87,3 +87,44 @@ def test_parse_rule_accepts_configured_mcp_namespace_and_hyphen() -> None:
 
     assert rule.tool == "github__create-issue"
     assert rule.match_type == "exact"
+
+
+def test_regex_rule_uses_search_and_beats_glob() -> None:
+    layer = PermissionLayer(
+        "project",
+        rules=(
+            parse_rule("run_command(git *)", "deny", "project", TOOLS),
+            parse_rule("run_command(re:^git status$)", "allow", "project", TOOLS),
+        ),
+    )
+
+    decision = RuleEngine().decide(request("run_command", "git status"), (layer,))
+
+    assert decision is not None and decision.allowed
+    assert decision.matched_rule and decision.matched_rule.match_type == "regex"
+
+
+def test_negated_permission_rule_inverts_match_and_keeps_inner_priority() -> None:
+    rule = parse_rule("!run_command(glob:git status)", "deny", "project", TOOLS)
+
+    assert rule.match_type == "glob"
+    assert not rule.matcher.matches("git status")
+    assert rule.matcher.matches("git push")
+    assert rule.expression == "!run_command(glob:git status)"
+
+
+def test_same_type_uses_deny_then_declaration_order() -> None:
+    first_allow = parse_rule("run_command(re:^git)", "allow", "project", TOOLS)
+    later_allow = parse_rule("run_command(re:git)", "allow", "project", TOOLS)
+    deny = parse_rule("run_command(re:status$)", "deny", "project", TOOLS)
+    layer = PermissionLayer("project", rules=(first_allow, later_allow, deny))
+
+    decision = RuleEngine().decide(request("run_command", "git status"), (layer,))
+
+    assert decision is not None and not decision.allowed
+    assert decision.matched_rule is deny
+
+
+def test_invalid_regex_rule_is_rejected_during_parse() -> None:
+    with pytest.raises(ValueError, match="正则"):
+        parse_rule("run_command(re:()", "allow", "project", TOOLS)

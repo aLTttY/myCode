@@ -343,6 +343,29 @@ class ContextManager:
     def compact(self, template: ChatRequest) -> CompactionReport:
         return self.prepare_request(template, trigger="manual").report
 
+    def rebuild_prepared_request(
+        self,
+        template: ChatRequest,
+        report: CompactionReport,
+    ) -> PreparedContext:
+        """Rebuild from committed context state and recheck budget without compacting again."""
+        request = self._build_request(
+            template,
+            self._entries,
+            self._state.summary,
+            self._state.boundary,
+        )
+        tokens = self.estimator.estimate(request)
+        allowed = tokens < report.budget_tokens
+        reason = report.reason
+        if not allowed:
+            reason = "动态系统指令更新后超出上下文预算。"
+        return PreparedContext(
+            allowed=allowed,
+            request=request,
+            report=replace(report, after_tokens=tokens, reason=reason),
+        )
+
     def record_usage(self, request: ChatRequest, usage: TokenUsage | None) -> None:
         if self.estimator.record_usage(request, usage):
             self._state = replace(self._state, token_anchor=self.estimator.anchor)

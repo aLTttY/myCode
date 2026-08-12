@@ -4,25 +4,34 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Literal, Mapping
 
+from mycode.matching import MatchKind, MatchPattern
+
 
 PermissionMode = Literal["strict", "default", "allow"]
 RuleEffect = Literal["allow", "deny"]
 RuleSource = Literal["session", "local", "project", "user"]
-MatchType = Literal["exact", "glob"]
 ApprovalChoice = Literal["deny", "allow_once", "allow_session"]
 
 
 @dataclass(frozen=True)
 class PermissionRule:
     tool: str
-    pattern: str
+    matcher: MatchPattern
     effect: RuleEffect
     source: RuleSource
-    match_type: MatchType
+
+    @property
+    def pattern(self) -> str:
+        return self.matcher.value
+
+    @property
+    def match_type(self) -> MatchKind:
+        return self.matcher.kind
 
     @property
     def expression(self) -> str:
-        return f"{self.tool}({self.pattern})"
+        prefix = "!" if self.matcher.negated else ""
+        return f"{prefix}{self.tool}({self.matcher.render()})"
 
 
 @dataclass(frozen=True)
