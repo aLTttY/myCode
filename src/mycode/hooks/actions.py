@@ -7,7 +7,7 @@ import re
 import signal
 import subprocess
 import threading
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -40,6 +40,8 @@ class _AsyncJob:
     action: CommandAction | HTTPAction
     event: HookEvent
     callback: Callable[[HookActionOutcome], None] | None
+    workspace_root: Path
+    process_environment: Mapping[str, str] | None
 
 
 class HookActionExecutor:
@@ -68,6 +70,9 @@ class HookActionExecutor:
         action: HookAction,
         event: HookEvent,
         callback: Callable[[HookActionOutcome], None] | None = None,
+        *,
+        workspace_root: Path | None = None,
+        process_environment: Mapping[str, str] | None = None,
     ) -> HookActionOutcome:
         if self._closing.is_set():
             return HookActionOutcome("cancelled", "Hook 动作执行器已关闭。", "executor_closed")
@@ -98,7 +103,15 @@ class HookActionExecutor:
                     "executor_closed",
                 )
             try:
-                self._jobs.put_nowait(_AsyncJob(action, event, callback))
+                self._jobs.put_nowait(
+                    _AsyncJob(
+                        action,
+                        event,
+                        callback,
+                        (workspace_root or self.workspace_root).resolve(),
+                        process_environment,
+                    )
+                )
             except queue.Full:
                 return HookActionOutcome(
                     "failed",
@@ -106,7 +119,14 @@ class HookActionExecutor:
                     "async_queue_full",
                 )
             return HookActionOutcome("submitted", code="async_submitted")
-        return self._execute_sync(action, event)
+        if workspace_root is None and process_environment is None:
+            return self._execute_sync(action, event)
+        return self._execute_sync(
+            action,
+            event,
+            workspace_root=workspace_root,
+            process_environment=process_environment,
+        )
 
     def _ensure_workers(self) -> None:
         with self._state_lock:
@@ -163,7 +183,18 @@ class HookActionExecutor:
                         "shutdown",
                     )
                 else:
-                    outcome = self._execute_sync(job.action, job.event)
+                    if (
+                        job.workspace_root == self.workspace_root
+                        and job.process_environment is None
+                    ):
+                        outcome = self._execute_sync(job.action, job.event)
+                    else:
+                        outcome = self._execute_sync(
+                            job.action,
+                            job.event,
+                            workspace_root=job.workspace_root,
+                            process_environment=job.process_environment,
+                        )
                 self._notify(job.callback, outcome)
             finally:
                 self._jobs.task_done()
@@ -184,20 +215,39 @@ class HookActionExecutor:
         self,
         action: CommandAction | HTTPAction,
         event: HookEvent,
+        *,
+        workspace_root: Path | None = None,
+        process_environment: Mapping[str, str] | None = None,
     ) -> HookActionOutcome:
         if self._closing.is_set():
             return HookActionOutcome("cancelled", "Hook 动作执行器已关闭。", "executor_closed")
         if isinstance(action, CommandAction):
-            return self._execute_command(action, event)
+            return self._execute_command(
+                action,
+                event,
+                workspace_root=workspace_root,
+                process_environment=process_environment,
+            )
         return self._execute_http(action, event)
 
-    def _execute_command(self, action: CommandAction, event: HookEvent) -> HookActionOutcome:
+    def _execute_command(
+        self,
+        action: CommandAction,
+        event: HookEvent,
+        *,
+        workspace_root: Path | None = None,
+        process_environment: Mapping[str, str] | None = None,
+    ) -> HookActionOutcome:
         payload = _event_json(event)
+        environment = dict(os.environ)
+        if process_environment:
+            environment.update(process_environment)
         try:
             process = subprocess.Popen(
                 action.command,
                 shell=True,
-                cwd=self.workspace_root,
+                cwd=workspace_root or self.workspace_root,
+                env=environment,
                 stdin=subprocess.PIPE,
                 stdout=subprocess.PIPE,
                 stderr=subprocess.PIPE,

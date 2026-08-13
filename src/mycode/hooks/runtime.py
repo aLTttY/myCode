@@ -1,8 +1,9 @@
 from __future__ import annotations
 
 import threading
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass
+from pathlib import Path
 
 from mycode.context.models import CompactionReport
 from mycode.prompts.modes import DynamicInstruction
@@ -50,6 +51,7 @@ class HookRuntime:
         *,
         _shared_once: tuple[set[str], set[str], threading.RLock] | None = None,
         _owns_action_executor: bool = True,
+        _process_environment: Mapping[str, str] | None = None,
     ) -> None:
         self.snapshot = snapshot
         self.events = event_factory
@@ -71,6 +73,7 @@ class HookRuntime:
         self._session_active = False
         self._closed = False
         self._owns_action_executor = _owns_action_executor
+        self._process_environment = _process_environment
 
     def fork_scope(
         self,
@@ -79,8 +82,13 @@ class HookRuntime:
         *,
         kind: str,
         role: str = "",
+        workspace_root: Path | None = None,
+        process_environment: Mapping[str, str] | None = None,
     ) -> "HookRuntime":
-        events = HookEventFactory(self.events.workspace_root, clock=self.events.clock)
+        events = HookEventFactory(
+            workspace_root or self.events.workspace_root,
+            clock=self.events.clock,
+        )
         events.set_agent_scope(kind, task_id=scope_id, role=role)
         scope = HookRuntime(
             self.snapshot,
@@ -89,6 +97,7 @@ class HookRuntime:
             self._diagnostic_sink,
             _shared_once=(self._consumed_once, self._in_flight_once, self._lock),
             _owns_action_executor=False,
+            _process_environment=process_environment,
         )
         scope.begin_session(session_id, kind)
         return scope
@@ -280,6 +289,22 @@ class HookRuntime:
                 "action_executor_unavailable",
             )
         try:
+            if (
+                self._process_environment is not None
+                or self.events.workspace_root
+                != getattr(
+                    self.action_executor,
+                    "workspace_root",
+                    self.events.workspace_root,
+                )
+            ):
+                return self.action_executor.execute(
+                    rule.action,
+                    event,
+                    callback=lambda outcome: self._async_outcome(rule, event, outcome),
+                    workspace_root=self.events.workspace_root,
+                    process_environment=self._process_environment,
+                )
             return self.action_executor.execute(
                 rule.action,
                 event,

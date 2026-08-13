@@ -34,9 +34,18 @@ class PermissionTargetResolver:
         with self._lock:
             self._dynamic_call_tools = frozenset(names)
 
-    def resolve(self, call: ToolCall, workspace_root: Path) -> PermissionRequest:
+    def resolve(
+        self,
+        call: ToolCall,
+        workspace_root: Path,
+        excluded_roots: tuple[Path, ...] = (),
+    ) -> PermissionRequest:
         if call.name in FILE_TOOLS:
-            _, target = resolve_workspace_path(workspace_root, _required_string(call.arguments, "path"))
+            _, target = resolve_workspace_path(
+                workspace_root,
+                _required_string(call.arguments, "path"),
+                excluded_roots=excluded_roots,
+            )
         elif call.name == "run_command":
             target = _required_string(call.arguments, "command")
         elif call.name == "find_files":
@@ -45,7 +54,11 @@ class PermissionTargetResolver:
             path = call.arguments.get("path", ".")
             if not isinstance(path, str) or not path:
                 raise PermissionValidationError("invalid_target", "参数 `path` 必须是非空字符串。")
-            _, target = resolve_workspace_path(workspace_root, path)
+            _, target = resolve_workspace_path(
+                workspace_root,
+                path,
+                excluded_roots=excluded_roots,
+            )
         elif any(
             call.name.startswith(prefix) and len(call.name) > len(prefix)
             for prefix in self.mcp_tool_prefixes

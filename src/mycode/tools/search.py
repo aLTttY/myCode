@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import fnmatch
+import os
 import re
 from collections.abc import Iterable, Mapping
 from pathlib import Path
@@ -23,15 +24,45 @@ def _inside_workspace(path: Path, workspace_root: Path) -> bool:
     return True
 
 
-def _iter_files(root: Path, workspace_root: Path) -> Iterable[Path]:
+def _excluded(path: Path, excluded_roots: tuple[Path, ...]) -> bool:
+    resolved = path.resolve(strict=False)
+    for excluded in excluded_roots:
+        try:
+            resolved.relative_to(excluded.resolve(strict=False))
+            return True
+        except ValueError:
+            continue
+    return False
+
+
+def _iter_files(
+    root: Path,
+    workspace_root: Path,
+    excluded_roots: tuple[Path, ...] = (),
+) -> Iterable[Path]:
+    if _excluded(root, excluded_roots):
+        return
     if root.is_file() and _inside_workspace(root, workspace_root):
         yield root
         return
-    for path in root.rglob("*"):
-        if any(part in SKIP_DIRS for part in path.relative_to(root).parts):
-            continue
-        if path.is_file() and _inside_workspace(path, workspace_root):
-            yield path
+    for current, directories, filenames in os.walk(root, topdown=True, followlinks=False):
+        current_path = Path(current)
+        directories[:] = [
+            name
+            for name in directories
+            if name not in SKIP_DIRS
+            and not _excluded(current_path / name, excluded_roots)
+            and not (current_path / name).is_symlink()
+        ]
+        for name in filenames:
+            path = current_path / name
+            if (
+                not path.is_symlink()
+                and not _excluded(path, excluded_roots)
+                and path.is_file()
+                and _inside_workspace(path, workspace_root)
+            ):
+                yield path
 
 
 def _is_binary(path: Path) -> bool:
@@ -61,7 +92,7 @@ class FindFilesTool:
             pattern = require_str(arguments, "pattern")
             matches: list[str] = []
             root = context.workspace_root.resolve()
-            for path in _iter_files(root, root):
+            for path in _iter_files(root, root, context.excluded_roots):
                 relative = path.relative_to(root).as_posix()
                 if fnmatch.fnmatch(relative, pattern) or fnmatch.fnmatch(path.name, pattern):
                     matches.append(relative)
@@ -115,7 +146,11 @@ class SearchCodeTool:
             scope = arguments.get("path", ".")
             if not isinstance(scope, str) or not scope:
                 raise ToolError("参数 `path` 必须是非空字符串。")
-            root, _ = resolve_workspace_path(context.workspace_root, scope)
+            root, _ = resolve_workspace_path(
+                context.workspace_root,
+                scope,
+                excluded_roots=context.excluded_roots,
+            )
             if not root.exists():
                 return result_error("搜索范围不存在。", path=str(root))
         except ToolError as exc:
@@ -124,7 +159,7 @@ class SearchCodeTool:
             return result_error(exc.message)
         matches: list[dict[str, object]] = []
         workspace_root = context.workspace_root.resolve()
-        for path in _iter_files(root, workspace_root):
+        for path in _iter_files(root, workspace_root, context.excluded_roots):
             if _is_binary(path):
                 continue
             try:

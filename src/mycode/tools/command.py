@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import subprocess
+import os
 from collections.abc import Mapping
 
 from mycode.tools.base import execution_result, optional_float, require_str, result_error, result_ok, truncate_text
@@ -28,6 +29,9 @@ class RunCommandTool:
         try:
             command = require_str(arguments, "command")
             timeout = min(optional_float(arguments, "timeout_seconds", context.timeout_seconds), context.timeout_seconds)
+            environment = dict(os.environ)
+            if context.process_environment:
+                environment.update(context.process_environment)
             completed = subprocess.run(
                 command,
                 cwd=context.workspace_root,
@@ -36,6 +40,7 @@ class RunCommandTool:
                 capture_output=True,
                 timeout=timeout,
                 check=False,
+                env=environment,
             )
             full_stdout = completed.stdout
             full_stderr = completed.stderr

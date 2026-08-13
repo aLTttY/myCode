@@ -23,6 +23,7 @@ REQUIRED_FIELDS = frozenset(
         "permission_mode",
     }
 )
+OPTIONAL_FIELDS = frozenset({"isolation"})
 MODEL_TIERS = frozenset({"inherit", "haiku", "sonnet", "opus"})
 PERMISSION_MODES = frozenset({"inherit", "default", "strict"})
 GLOBAL_CHILD_DENY = frozenset({"Agent", "Task", "load_skill"})
@@ -91,7 +92,7 @@ def parse_agent_text(
 ) -> AgentDefinition:
     metadata, prompt = _split_frontmatter(text)
     missing = REQUIRED_FIELDS - set(metadata)
-    unknown = set(metadata) - REQUIRED_FIELDS
+    unknown = set(metadata) - REQUIRED_FIELDS - OPTIONAL_FIELDS
     if missing:
         raise AgentDefinitionError(
             "missing_field", f"缺少必填字段：{', '.join(sorted(missing))}。"
@@ -139,6 +140,11 @@ def parse_agent_text(
             "invalid_permission_mode",
             "permission_mode 必须是 inherit、default 或 strict。",
         )
+    isolation = metadata.get("isolation", "shared")
+    if "isolation" in metadata and isolation != "worktree":
+        raise AgentDefinitionError(
+            "invalid_isolation", "isolation 省略时为 shared，显式值只能是 worktree。"
+        )
 
     return AgentDefinition(
         name=name,
@@ -148,6 +154,7 @@ def parse_agent_text(
         model=model,
         max_iterations=max_iterations,
         permission_mode=permission_mode,
+        isolation=isolation,
         system_prompt=prompt,
         source=source,
         source_id=source_id,

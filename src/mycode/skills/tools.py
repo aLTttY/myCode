@@ -80,6 +80,7 @@ class SkillScriptTool:
                 [sys.executable, str(script)],
                 cwd=context.workspace_root,
                 env={
+                    **dict(context.process_environment or {}),
                     "PYTHONIOENCODING": "utf-8",
                     "PYTHONUNBUFFERED": "1",
                 },

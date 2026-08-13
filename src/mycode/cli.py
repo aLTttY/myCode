@@ -61,6 +61,13 @@ from .tool_safety import SYSTEM_TOOLS
 from .tools.registry import create_default_registry
 from .context.models import CompactionReport
 from .types import ConfigError, ProviderError, TokenUsage, ToolContext, ToolError
+from .worktrees import (
+    WorkspaceContextFactory,
+    WorkspaceInitializer,
+    WorktreeJanitor,
+    WorktreeManager,
+)
+from .agents.worktree_executor import WorktreeTaskExecutor
 
 
 # 未指定 --config 时使用的默认配置文件
@@ -128,6 +135,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     memory_worker = None
     hook_runtime: HookRuntime | None = None
     task_manager: AgentTaskManager | None = None
+    worktree_janitor: WorktreeJanitor | None = None
     try:
         try:
             remote_tools, discovery_warnings = mcp_manager.discover()
@@ -229,10 +237,14 @@ def main(argv: Sequence[str] | None = None) -> int:
         role_runtime = AgentRoleRuntime()
         request_bridge = ParentRequestBridge()
         task_holder: dict[str, AgentTaskManager] = {}
+        main_tool_context = ToolContext(
+            workspace_root=workspace_root,
+            excluded_roots=(workspace_root / ".mycode" / "worktrees",),
+        )
         child_executor = ChildAgentExecutor(
             provider_supplier=provider_pool.get,
             base_registry=tool_registry,
-            tool_context=ToolContext(workspace_root=workspace_root),
+            tool_context=main_tool_context,
             permission_factory=ChildPermissionFactory(
                 permission_service, mcp_tool_prefixes=mcp_tool_prefixes
             ),
@@ -242,13 +254,23 @@ def main(argv: Sequence[str] | None = None) -> int:
                 task_id
             ),
         )
+        worktree_manager = WorktreeManager(config.agents.worktree)
+        worktree_executor = WorktreeTaskExecutor(
+            child_executor,
+            worktree_manager,
+            WorkspaceInitializer(worktree_manager.git, config.agents.worktree),
+            WorkspaceContextFactory(main_tool_context),
+        )
+        worktree_janitor = WorktreeJanitor(workspace_root, worktree_manager)
+        worktree_janitor.start()
         task_manager = AgentTaskManager(
-            child_executor.run,
+            worktree_executor.run,
             max_concurrency=config.agents.max_concurrency,
             max_queue_size=config.agents.max_queue_size,
             inbox_preview_chars=config.agents.inbox_preview_chars,
             notification_sink=_print_agent_notification,
         )
+        worktree_executor.set_state_sink(task_manager.update_worktree)
         task_holder["manager"] = task_manager
         agent_holder: dict[str, AgentRunner] = {}
         session_supplier = lambda: agent_holder["agent"].session_journal.session_id
@@ -261,6 +283,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                 lambda: config.model,
                 config.agents,
                 PromptToolkitForegroundWaiter(),
+                worktree_manager.requests,
             )
         )
         tool_registry.register(
@@ -283,7 +306,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         isolated_skill_runner = IsolatedSkillRunner(
             app_config=config,
             base_registry=tool_registry,
-            tool_context=ToolContext(workspace_root=workspace_root),
+            tool_context=main_tool_context,
             permission_service=permission_service,
             snapshot_supplier=lambda: skill_runtime.snapshot,
             instruction_bundle=instruction_bundle,
@@ -297,7 +320,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         agent = AgentRunner(
             provider,
             full_registry=tool_registry,
-            tool_context=ToolContext(workspace_root=workspace_root),
+            tool_context=main_tool_context,
             permission_service=permission_service,
             context_config=config.context,
             session_journal=journal,
@@ -339,6 +362,8 @@ def main(argv: Sequence[str] | None = None) -> int:
         finally:
             if hook_runtime is not None:
                 hook_runtime.end_session(exit_reason)
+            if worktree_janitor is not None:
+                worktree_janitor.close(config.agents.shutdown_timeout_seconds)
             if task_manager is not None:
                 report = task_manager.shutdown(config.agents.shutdown_timeout_seconds)
                 if report.unfinished:
@@ -363,6 +388,8 @@ def main(argv: Sequence[str] | None = None) -> int:
         print(f"Skill 启动错误：{message}", file=sys.stderr)
         return 1
     finally:
+        if worktree_janitor is not None:
+            worktree_janitor.close(config.agents.shutdown_timeout_seconds)
         if hook_runtime is not None:
             hook_runtime.close()
         mcp_manager.close()
@@ -597,6 +624,15 @@ class TerminalCommandUI:
                 delivery_mode=item.delivery_mode,
                 token_usage=item.token_usage,
                 failure_reason=item.failure_reason,
+                worktree_path=item.worktree.path if item.worktree else "",
+                worktree_branch=item.worktree.branch if item.worktree else "",
+                worktree_base_commit=(
+                    item.worktree.base_commit if item.worktree else ""
+                ),
+                worktree_status=item.worktree.status if item.worktree else "",
+                worktree_reason=(
+                    item.worktree.retention_reason if item.worktree else ""
+                ),
             )
             for item in self.task_manager.list_tasks(session_id)
         )

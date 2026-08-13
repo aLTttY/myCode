@@ -21,6 +21,7 @@ from mycode.types import (
 )
 from mycode.tools.file_cache import FileReadCache
 from mycode.tools.registry import ToolRegistry
+from mycode.worktrees.context import ChildWorkspaceContext
 
 from .models import ChildRunSpec, PermissionAuditEntry, TaskOutcome
 from .permissions import ChildPermissionFactory
@@ -52,7 +53,12 @@ class ChildAgentExecutor:
             lambda task_id: False
         )
 
-    def run(self, spec: ChildRunSpec, cancellation: object) -> TaskOutcome:
+    def run(
+        self,
+        spec: ChildRunSpec,
+        cancellation: object,
+        workspace_context: ChildWorkspaceContext | None = None,
+    ) -> TaskOutcome:
         audit: list[PermissionAuditEntry] = []
         usage: TokenUsage | None = None
         hook_scope = None
@@ -66,9 +72,10 @@ class ChildAgentExecutor:
                 spec.role.permission_mode if spec.role is not None else "inherit",
                 audit.append,
             )
-            context = replace(
-                self.tool_context,
-                file_read_cache=FileReadCache(),
+            context = (
+                workspace_context.tool_context
+                if workspace_context is not None
+                else replace(self.tool_context, file_read_cache=FileReadCache())
             )
             policy = spec.tool_policy
             if policy is None:
@@ -79,11 +86,13 @@ class ChildAgentExecutor:
                     spec.task_id,
                     kind=spec.kind,
                     role=spec.role.name if spec.role else "",
+                    workspace_root=context.workspace_root,
+                    process_environment=context.process_environment,
                 )
                 hook_scope.begin_turn(spec.parent_mode, "agent")
                 hook_scope.message_received(spec.prompt)
 
-            template, messages, registry = self._initial_state(spec)
+            template, messages, registry = self._initial_state(spec, workspace_context)
             max_iterations = spec.role.max_iterations if spec.role is not None else 8
             for _iteration in range(1, max_iterations + 1):
                 if cancellation.is_cancelled():
@@ -207,7 +216,9 @@ class ChildAgentExecutor:
                     pass
 
     def _initial_state(
-        self, spec: ChildRunSpec
+        self,
+        spec: ChildRunSpec,
+        workspace_context: ChildWorkspaceContext | None = None,
     ) -> tuple[ChatRequest, list[Message], ToolRegistry]:
         if spec.kind == "fork":
             if spec.fork_snapshot is None or spec.role is not None:
@@ -223,22 +234,42 @@ class ChildAgentExecutor:
             self.base_registry,
             background=spec.initial_background,
         )
+        workspace = (
+            workspace_context.tool_context.workspace_root
+            if workspace_context is not None
+            else self.tool_context.workspace_root
+        )
+        instructions = (
+            workspace_context.instruction_bundle
+            if workspace_context is not None
+            else self.instruction_bundle
+        )
         prompt = PromptBuilder().build(
             mode=spec.parent_mode,
             iteration=1,
             environment=EnvironmentInfo(
-                cwd=str(self.tool_context.workspace_root),
+                cwd=str(workspace),
                 date=date.today().isoformat(),
                 mode=spec.parent_mode,
             ),
-            options=PromptOptions(custom_instructions=self.instruction_bundle.content),
+            options=PromptOptions(
+                custom_instructions=instructions.content,
+                long_term_memory=(
+                    workspace_context.project_memory_prompt
+                    if workspace_context is not None
+                    else ""
+                ),
+            ),
         )
+        dynamic_messages = list(prompt.dynamic_system_messages)
+        if workspace_context is not None:
+            dynamic_messages.append(workspace_context.isolation_instruction)
         optional = "\n\n".join(
             part for part in (prompt.optional_system_prompt, spec.role.system_prompt) if part
         )
         template = ChatRequest(
             stable_system_prompt=prompt.stable_system_prompt,
-            dynamic_system_messages=(prompt.environment_message, *prompt.dynamic_system_messages),
+            dynamic_system_messages=(prompt.environment_message, *dynamic_messages),
             messages=(),
             optional_system_prompt=optional,
             tools=tuple(registry.tool_specs()),

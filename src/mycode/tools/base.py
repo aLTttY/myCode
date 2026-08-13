@@ -48,7 +48,11 @@ def optional_float(arguments: Mapping[str, object], key: str, default: float) ->
     return float(value)
 
 
-def resolve_workspace_path(workspace_root: Path, value: str) -> Path:
+def resolve_workspace_path(
+    workspace_root: Path,
+    value: str,
+    excluded_roots: tuple[Path, ...] = (),
+) -> Path:
     requested = Path(value)
     if requested.is_absolute():
         raise ToolError("路径必须是工作区内的相对路径。")
@@ -59,6 +63,12 @@ def resolve_workspace_path(workspace_root: Path, value: str) -> Path:
         resolved.relative_to(root)
     except ValueError as exc:
         raise ToolError("路径不能指向工作区外。") from exc
+    for excluded in excluded_roots:
+        try:
+            resolved.relative_to(excluded.resolve(strict=False))
+        except ValueError:
+            continue
+        raise ToolError("路径位于当前任务排除的受管工作区。")
     return resolved
 
 

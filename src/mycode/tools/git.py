@@ -52,6 +52,8 @@ class ReadGitChangesTool:
         deadline = time.monotonic() + max(0.0, context.timeout_seconds)
         outputs: dict[str, str] = {}
         environment = dict(os.environ)
+        if context.process_environment:
+            environment.update(context.process_environment)
         environment["GIT_OPTIONAL_LOCKS"] = "0"
         environment["GIT_PAGER"] = "cat"
 

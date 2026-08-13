@@ -10,13 +10,14 @@ from mycode.agent.cancellation import CancellationToken
 from mycode.providers.base import ChatRequest
 from mycode.tools.registry import ToolRegistry
 from mycode.types import TokenUsage
+from mycode.worktrees.models import WorktreeRequest, WorktreeTaskSummary
 
 
 AgentSource = Literal["project", "user", "builtin", "plugin"]
 ModelTier = Literal["inherit", "haiku", "sonnet", "opus"]
 ChildPermissionMode = Literal["inherit", "default", "strict"]
 AgentKind = Literal["defined", "fork"]
-TaskStatus = Literal["queued", "running", "completed", "failed", "cancelled"]
+TaskStatus = Literal["queued", "running", "cancelling", "completed", "failed", "cancelled"]
 TerminalTaskStatus = Literal["completed", "failed", "cancelled"]
 DeliveryMode = Literal["foreground", "background"]
 
@@ -34,6 +35,7 @@ class AgentDefinition:
     source: AgentSource
     source_id: str
     fingerprint: str
+    isolation: Literal["shared", "worktree"] = "shared"
 
 
 @dataclass(frozen=True)
@@ -97,6 +99,7 @@ class ChildRunSpec:
     parent_mode: Literal["default", "plan"]
     fork_snapshot: ForkRequestSnapshot | None
     tool_policy: object | None = None
+    worktree_request: WorktreeRequest | None = None
 
 
 @dataclass(frozen=True)
@@ -114,6 +117,7 @@ class TaskOutcome:
     failure_reason: str = ""
     token_usage: TokenUsage | None = None
     permission_audit: tuple[PermissionAuditEntry, ...] = ()
+    worktree: WorktreeTaskSummary | None = None
 
 
 @dataclass
@@ -129,6 +133,7 @@ class TaskRecord:
     cancellation: CancellationToken
     done: threading.Event
     notification_attempted: bool = False
+    worktree: WorktreeTaskSummary | None = None
 
 
 @dataclass(frozen=True)
@@ -145,6 +150,7 @@ class TaskSnapshot:
     cancel_requested: bool
     token_usage: TokenUsage | None
     failure_reason: str
+    worktree: WorktreeTaskSummary | None = None
 
 
 @dataclass(frozen=True)
@@ -165,6 +171,7 @@ class InboxItem:
     failure_reason: str
     token_usage: TokenUsage | None
     finished_at: datetime
+    worktree: WorktreeTaskSummary | None = None
 
 
 @dataclass(frozen=True)

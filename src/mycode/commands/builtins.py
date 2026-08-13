@@ -277,9 +277,18 @@ def format_agent_tasks(tasks: tuple[AgentTaskSummary, ...]) -> str:
         role = task.role or "-"
         usage = format_token_usage(task.token_usage)
         suffix = f" failure={task.failure_reason}" if task.failure_reason else ""
+        workspace = ""
+        if task.worktree_status:
+            workspace = (
+                f" worktree={task.worktree_status} path={task.worktree_path}"
+                f" branch={task.worktree_branch} base={task.worktree_base_commit}"
+            )
+            if task.worktree_reason:
+                workspace += f" reason={task.worktree_reason}"
         rows.append(
             f"  {task.task_id} type={task.kind} role={role} "
-            f"status={task.status} delivery={task.delivery_mode} usage={usage}{suffix}"
+            f"status={task.status} delivery={task.delivery_mode} usage={usage}"
+            f"{workspace}{suffix}"
         )
     return "\n".join(rows)
 

@@ -18,6 +18,7 @@ from .models import (
     TaskRecord,
     TaskSnapshot,
 )
+from mycode.worktrees.models import WorktreeTaskSummary
 
 
 TaskExecutor = Callable[[ChildRunSpec, object], TaskOutcome]
@@ -92,6 +93,17 @@ class AgentTaskManager:
                 outcome=None,
                 cancellation=CancellationToken(),
                 done=threading.Event(),
+                worktree=(
+                    WorktreeTaskSummary(
+                        path=str(spec.worktree_request.worktree_path),
+                        branch=spec.worktree_request.branch_ref,
+                        base_commit=spec.worktree_request.base_commit,
+                        status="preparing",
+                        last_active_at=now,
+                    )
+                    if spec.worktree_request is not None
+                    else None
+                ),
             )
             self._records[spec.task_id] = record
             self._queue.append(spec.task_id)
@@ -158,15 +170,31 @@ class AgentTaskManager:
                     self._queue.remove(task_id)
                 except ValueError:
                     pass
-            record.status = "cancelled"
-            record.finished_at = datetime.now(timezone.utc)
-            record.outcome = TaskOutcome("cancelled", failure_reason="任务已取消。")
-            record.done.set()
-            notification = self._deliver_locked(record)
+                record.status = "cancelled"
+                record.finished_at = datetime.now(timezone.utc)
+                record.outcome = TaskOutcome("cancelled", failure_reason="任务已取消。")
+                record.done.set()
+                notification = self._deliver_locked(record)
+            else:
+                record.status = "cancelling"
             self._condition.notify_all()
             snapshot = self._snapshot(record)
         self._notify(notification)
         return snapshot
+
+    def update_worktree(
+        self,
+        task_id: str,
+        summary: WorktreeTaskSummary,
+    ) -> None:
+        with self._condition:
+            record = self._records.get(task_id)
+            if record is None or record.status in {"completed", "failed", "cancelled"}:
+                return
+            if record.spec.worktree_request is None:
+                return
+            record.worktree = summary
+            self._condition.notify_all()
 
     def take_inbox(self, session_id: str) -> tuple[InboxItem, ...]:
         with self._condition:
@@ -181,12 +209,16 @@ class AgentTaskManager:
 
     def cancel_session(self, session_id: str, *, clear_inbox: bool) -> int:
         with self._condition:
-            ids = [
-                record.spec.task_id
+            records = [
+                record
                 for record in self._records.values()
                 if record.spec.session_id == session_id
                 and record.status not in {"completed", "failed", "cancelled"}
             ]
+            if clear_inbox:
+                for record in records:
+                    record.notification_attempted = True
+            ids = [record.spec.task_id for record in records]
         for task_id in ids:
             self.cancel_task(session_id, task_id)
         if clear_inbox:
@@ -273,6 +305,7 @@ class AgentTaskManager:
                             failure_reason="任务已取消。",
                             token_usage=outcome.token_usage,
                             permission_audit=outcome.permission_audit,
+                            worktree=outcome.worktree,
                         )
                     record.status = outcome.status
                     record.outcome = outcome
@@ -291,6 +324,20 @@ class AgentTaskManager:
     @staticmethod
     def _snapshot(record: TaskRecord) -> TaskSnapshot:
         outcome = record.outcome
+        worktree = outcome.worktree if outcome else record.worktree
+        if worktree is None and record.spec.worktree_request is not None:
+            request = record.spec.worktree_request
+            from .models import WorktreeTaskSummary
+
+            worktree = WorktreeTaskSummary(
+                path=str(request.worktree_path),
+                branch=request.branch_ref,
+                base_commit=request.base_commit,
+                status=(
+                    "preparing"
+                ),
+                last_active_at=record.started_at or record.created_at,
+            )
         return TaskSnapshot(
             task_id=record.spec.task_id,
             session_id=record.spec.session_id,
@@ -304,6 +351,7 @@ class AgentTaskManager:
             cancel_requested=record.cancel_requested,
             token_usage=outcome.token_usage if outcome else None,
             failure_reason=outcome.failure_reason if outcome else "",
+            worktree=worktree,
         )
 
     def _details(self, record: TaskRecord) -> TaskDetails:
@@ -330,6 +378,7 @@ class AgentTaskManager:
             failure_reason=record.outcome.failure_reason,
             token_usage=record.outcome.token_usage,
             finished_at=record.finished_at,
+            worktree=record.outcome.worktree,
         )
         self._inbox[record.spec.session_id].append(item)
         return item

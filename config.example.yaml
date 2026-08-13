@@ -27,10 +27,41 @@ agents:
   max_concurrency: 4
   max_queue_size: 32
   inbox_preview_chars: 8000
+  # 仅定义式角色可用 isolation: worktree。根目录固定为
+  # <repo>/.mycode/worktrees/，不接受 LLM 或配置指定路径。
+  worktree:
+    git_timeout_seconds: 10
+    cleanup_interval_seconds: 300
+    stale_after_seconds: 86400
+    copy_max_files: 10000
+    copy_max_bytes: 104857600
+    initialization:
+      - action: copy
+        source: config.yaml
+        target: config.yaml
+        required: false
+      - action: copy
+        source: .mycode/permissions.local.yaml
+        target: .mycode/permissions.local.yaml
+        required: false
+      - action: copy
+        source: .mycode/hooks.local.yaml
+        target: .mycode/hooks.local.yaml
+        required: false
+      - action: symlink
+        source: .venv
+        target: .venv
+        required: false
+      - action: hooks
+        source: .git/hooks
+        required: false
 
 # Agent 角色位于项目 .mycode/agents/ 或用户 ~/.mycode/agents/；内置角色与
 # 由宿主注入的插件目录优先级更低。后台 allowlist 只能收紧执行面，不能放开
 # Agent、Task、load_skill 等全局禁止项，也不能跳过角色、Plan 或权限规则。
+# Worktree 初始化只允许安全相对路径和 copy/symlink/hooks，不执行脚本或安装依赖。
+# required 源缺失会阻止任务；可选源缺失只产生脱敏诊断。后台清理只读取本地
+# Git 引用，不执行 fetch、push、merge、rebase，也不会强制删除受保护改动。
 
 # OpenAI 示例：
 # protocol: openai

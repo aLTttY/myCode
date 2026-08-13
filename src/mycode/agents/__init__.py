@@ -10,6 +10,7 @@ from .models import (
     TaskDetails,
     TaskOutcome,
     TaskSnapshot,
+    WorktreeTaskSummary,
 )
 from .catalog import AgentCatalog
 from .runtime import AgentRoleRuntime
@@ -26,6 +27,7 @@ __all__ = [
     "TaskDetails",
     "TaskOutcome",
     "TaskSnapshot",
+    "WorktreeTaskSummary",
     "AgentCatalog",
     "AgentRoleRuntime",
 ]

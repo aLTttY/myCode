@@ -62,7 +62,11 @@ class PermissionService:
                 "system",
             )
         try:
-            request = self._resolver.resolve(call, context.workspace_root)
+            request = self._resolver.resolve(
+                call,
+                context.workspace_root,
+                context.excluded_roots,
+            )
         except PermissionValidationError as exc:
             return PermissionDecision(False, exc.reason_code, exc.message, exc.target)
 
@@ -84,7 +88,11 @@ class PermissionService:
                     command,
                 )
             try:
-                validate_command_paths(command, request.workspace_root)
+                validate_command_paths(
+                    command,
+                    request.workspace_root,
+                    context.excluded_roots,
+                )
             except PermissionValidationError as exc:
                 return PermissionDecision(False, exc.reason_code, exc.message, exc.target or command)
 

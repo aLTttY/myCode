@@ -14,6 +14,8 @@ from .policy import ChildToolPolicy
 from .runtime import AgentRoleRuntime
 from .tasks import AgentTaskManager
 from .waiting import EventForegroundWaiter, ForegroundWaiter
+from mycode.worktrees.manager import WorktreeRequestFactory
+from mycode.worktrees.identity import initialization_fingerprint
 
 
 SessionSupplier = Callable[[], str]
@@ -32,6 +34,7 @@ class AgentTool:
         model_supplier: ModelSupplier,
         config: AgentDelegationConfig,
         waiter: ForegroundWaiter | None = None,
+        worktree_requests: WorktreeRequestFactory | None = None,
     ) -> None:
         self.roles = roles
         self.bridge = bridge
@@ -40,6 +43,7 @@ class AgentTool:
         self.model_supplier = model_supplier
         self.config = config
         self.waiter = waiter or EventForegroundWaiter()
+        self.worktree_requests = worktree_requests
 
     @property
     def spec(self) -> ToolSpec:
@@ -65,7 +69,6 @@ class AgentTool:
     def run(
         self, arguments: Mapping[str, object], context: ToolContext
     ) -> ToolResult | ToolExecutionResult:
-        del context
         try:
             invocation = _agent_invocation(arguments)
             session_id = self.session_supplier()
@@ -88,6 +91,16 @@ class AgentTool:
                 background_allowed_tools=self.config.background_allowed_tools,
             )
             task_id = "agt_" + uuid.uuid4().hex[:16]
+            worktree_request = None
+            if role is not None and role.isolation == "worktree":
+                if self.worktree_requests is None:
+                    raise ValueError("Worktree 隔离服务未配置。")
+                worktree_request = self.worktree_requests.prepare(
+                    task_id,
+                    role.name,
+                    context.workspace_root,
+                    initialization_fingerprint(self.config.worktree.initialization),
+                )
             snapshot = self.tasks.submit(
                 ChildRunSpec(
                     task_id=task_id,
@@ -100,6 +113,7 @@ class AgentTool:
                     parent_mode=parent.mode,
                     fork_snapshot=parent if invocation.kind == "fork" else None,
                     tool_policy=policy,
+                    worktree_request=worktree_request,
                 )
             )
             if initial_background:
@@ -255,6 +269,22 @@ def _snapshot_payload(snapshot) -> dict[str, object]:
         "cancel_requested": snapshot.cancel_requested,
         "token_usage": asdict(snapshot.token_usage) if snapshot.token_usage else None,
         "failure_reason": snapshot.failure_reason,
+        "worktree": _worktree_payload(snapshot.worktree),
+    }
+
+
+def _worktree_payload(summary) -> dict[str, object] | None:
+    if summary is None:
+        return None
+    return {
+        "path": summary.path,
+        "branch": summary.branch,
+        "base_commit": summary.base_commit,
+        "status": summary.status,
+        "retention_reason": summary.retention_reason,
+        "last_active_at": (
+            summary.last_active_at.isoformat() if summary.last_active_at else None
+        ),
     }
 
 

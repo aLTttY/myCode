@@ -767,6 +767,16 @@ def _combine_inbox_message(user_text: str, items: Sequence[object]) -> str:
             if usage is not None
             else "null"
         )
+        worktree = getattr(item, "worktree", None)
+        workspace_text = ""
+        if worktree is not None:
+            workspace_text = (
+                f"worktree_status: {worktree.status}\n"
+                f"worktree_path: {worktree.path}\n"
+                f"worktree_branch: {worktree.branch}\n"
+                f"worktree_base: {worktree.base_commit}\n"
+                f"worktree_reason: {worktree.retention_reason or '-'}\n"
+            )
         blocks.append(
             "<mewcode_agent_result>\n"
             f"task_id: {getattr(item, 'task_id', '')}\n"
@@ -775,6 +785,7 @@ def _combine_inbox_message(user_text: str, items: Sequence[object]) -> str:
             f"status: {getattr(item, 'status', '')}\n"
             f"failure: {getattr(item, 'failure_reason', '') or '-'}\n"
             f"token_usage: {usage_text}\n"
+            f"{workspace_text}"
             "result:\n"
             f"{getattr(item, 'result_preview', '')}\n"
             "</mewcode_agent_result>"

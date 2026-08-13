@@ -119,3 +119,8 @@ class AgentTaskSummary:
     delivery_mode: str
     token_usage: TokenUsage | None
     failure_reason: str = ""
+    worktree_path: str = ""
+    worktree_branch: str = ""
+    worktree_base_commit: str = ""
+    worktree_status: str = ""
+    worktree_reason: str = ""

@@ -20,6 +20,8 @@ from .types import (
     MCPServerConfig,
     StdioMCPServerConfig,
     ThinkingConfig,
+    WorktreeConfig,
+    WorktreeInitRule,
 )
 
 
@@ -46,7 +48,17 @@ AGENT_CONFIG_FIELDS = {
     "max_concurrency",
     "max_queue_size",
     "inbox_preview_chars",
+    "worktree",
 }
+WORKTREE_CONFIG_FIELDS = {
+    "git_timeout_seconds",
+    "cleanup_interval_seconds",
+    "stale_after_seconds",
+    "initialization",
+    "copy_max_files",
+    "copy_max_bytes",
+}
+WORKTREE_RULE_FIELDS = {"action", "source", "target", "required"}
 MODEL_ALIAS_NAMES = {"haiku", "sonnet", "opus"}
 
 
@@ -194,7 +206,122 @@ def _parse_agent_config(value: Any) -> AgentDelegationConfig:
             minimum=1_000,
             maximum=20_000,
         ),
+        worktree=_parse_worktree_config(value.get("worktree")),
     )
+
+
+def _parse_worktree_config(value: Any) -> WorktreeConfig:
+    defaults = WorktreeConfig()
+    if value is None:
+        return defaults
+    if not isinstance(value, dict) or not all(isinstance(key, str) for key in value):
+        raise ConfigError("配置字段 `agents.worktree` 必须是对象。")
+    unknown = sorted(set(value) - WORKTREE_CONFIG_FIELDS)
+    if unknown:
+        raise ConfigError(
+            "配置字段 `agents.worktree` 包含未知字段："
+            f"{', '.join(unknown)}。"
+        )
+    rules_value = value.get("initialization", defaults.initialization)
+    if not isinstance(rules_value, (list, tuple)):
+        raise ConfigError("配置字段 `agents.worktree.initialization` 必须是规则列表。")
+    rules: list[WorktreeInitRule] = []
+    targets: set[str] = set()
+    for index, item in enumerate(rules_value):
+        prefix = f"agents.worktree.initialization[{index}]"
+        if not isinstance(item, (dict, WorktreeInitRule)):
+            raise ConfigError(f"配置字段 `{prefix}` 必须是对象。")
+        if isinstance(item, WorktreeInitRule):
+            rule = item
+        else:
+            if not all(isinstance(key, str) for key in item):
+                raise ConfigError(f"配置字段 `{prefix}` 的字段名必须是字符串。")
+            unknown_rule = sorted(set(item) - WORKTREE_RULE_FIELDS)
+            if unknown_rule:
+                raise ConfigError(
+                    f"配置字段 `{prefix}` 包含未知字段：{', '.join(unknown_rule)}。"
+                )
+            action = item.get("action")
+            if action not in {"copy", "symlink", "hooks"}:
+                raise ConfigError(f"配置字段 `{prefix}.action` 必须是 copy、symlink 或 hooks。")
+            source = item.get("source")
+            if not isinstance(source, str) or not source:
+                raise ConfigError(f"配置字段 `{prefix}.source` 必须是非空相对路径。")
+            target = item.get("target")
+            if action == "hooks":
+                if target is not None:
+                    raise ConfigError(f"配置字段 `{prefix}.target` 对 hooks 规则必须省略。")
+            elif not isinstance(target, str) or not target:
+                raise ConfigError(f"配置字段 `{prefix}.target` 对 {action} 规则必须是非空相对路径。")
+            required = item.get("required", False)
+            if not isinstance(required, bool):
+                raise ConfigError(f"配置字段 `{prefix}.required` 必须是布尔值。")
+            rule = WorktreeInitRule(action, source, target, required)
+        _validate_worktree_relative_path(rule.source, f"{prefix}.source")
+        if rule.target is not None:
+            _validate_worktree_relative_path(rule.target, f"{prefix}.target")
+            if any(
+                rule.target == previous
+                or rule.target.startswith(previous + "/")
+                or previous.startswith(rule.target + "/")
+                for previous in targets
+            ):
+                raise ConfigError(f"配置字段 `{prefix}.target` 与前序初始化目标冲突。")
+            targets.add(rule.target)
+        rules.append(rule)
+    return WorktreeConfig(
+        git_timeout_seconds=_nested_positive_number(
+            value, "git_timeout_seconds", defaults.git_timeout_seconds
+        ),
+        cleanup_interval_seconds=_nested_positive_number(
+            value, "cleanup_interval_seconds", defaults.cleanup_interval_seconds
+        ),
+        stale_after_seconds=_nested_positive_number(
+            value, "stale_after_seconds", defaults.stale_after_seconds
+        ),
+        initialization=tuple(rules),
+        copy_max_files=_nested_bounded_int(
+            value, "copy_max_files", defaults.copy_max_files, 1, 1_000_000
+        ),
+        copy_max_bytes=_nested_bounded_int(
+            value, "copy_max_bytes", defaults.copy_max_bytes, 1, 10 * 1024**3
+        ),
+    )
+
+
+def _validate_worktree_relative_path(value: str, field: str) -> None:
+    if "\\" in value:
+        raise ConfigError(f"配置字段 `{field}` 不能包含反斜杠。")
+    path = Path(value)
+    parts = value.split("/")
+    if (
+        path.is_absolute()
+        or not parts
+        or any(part in {"", ".", ".."} for part in parts)
+        or parts[:2] == [".mycode", "worktrees"]
+    ):
+        raise ConfigError(f"配置字段 `{field}` 必须是工作区内的安全相对路径。")
+
+
+def _nested_positive_number(raw: dict[str, Any], key: str, default: float) -> float:
+    value = raw.get(key, default)
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        raise ConfigError(f"配置字段 `agents.worktree.{key}` 必须是有限正数。")
+    number = float(value)
+    if not math.isfinite(number) or number <= 0:
+        raise ConfigError(f"配置字段 `agents.worktree.{key}` 必须是有限正数。")
+    return number
+
+
+def _nested_bounded_int(
+    raw: dict[str, Any], key: str, default: int, minimum: int, maximum: int
+) -> int:
+    value = raw.get(key, default)
+    if type(value) is not int or not minimum <= value <= maximum:
+        raise ConfigError(
+            f"配置字段 `agents.worktree.{key}` 必须是 {minimum}–{maximum} 之间的整数。"
+        )
+    return value
 
 
 def _agent_tool_list(value: Any) -> tuple[str, ...]:

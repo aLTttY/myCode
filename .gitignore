@@ -13,3 +13,5 @@ config.yaml
 .mycode/context/
 .mycode/sessions/
 .mycode/memory/
+.mycode/worktrees/
+.mycode/worktree.json

@@ -16,6 +16,41 @@ DEFAULT_BACKGROUND_AGENT_TOOLS = (
 
 
 @dataclass(frozen=True)
+class WorktreeInitRule:
+    action: Literal["copy", "symlink", "hooks"]
+    source: str
+    target: str | None = None
+    required: bool = False
+
+
+DEFAULT_WORKTREE_INIT_RULES = (
+    WorktreeInitRule("copy", "config.yaml", "config.yaml"),
+    WorktreeInitRule(
+        "copy",
+        ".mycode/permissions.local.yaml",
+        ".mycode/permissions.local.yaml",
+    ),
+    WorktreeInitRule(
+        "copy",
+        ".mycode/hooks.local.yaml",
+        ".mycode/hooks.local.yaml",
+    ),
+    WorktreeInitRule("symlink", ".venv", ".venv"),
+    WorktreeInitRule("hooks", ".git/hooks"),
+)
+
+
+@dataclass(frozen=True)
+class WorktreeConfig:
+    git_timeout_seconds: float = 10.0
+    cleanup_interval_seconds: float = 300.0
+    stale_after_seconds: float = 86_400.0
+    initialization: tuple[WorktreeInitRule, ...] = DEFAULT_WORKTREE_INIT_RULES
+    copy_max_files: int = 10_000
+    copy_max_bytes: int = 100 * 1024 * 1024
+
+
+@dataclass(frozen=True)
 class AgentDelegationConfig:
     model_aliases: Mapping[str, str] = field(
         default_factory=lambda: MappingProxyType({})
@@ -28,6 +63,7 @@ class AgentDelegationConfig:
     max_concurrency: int = 4
     max_queue_size: int = 32
     inbox_preview_chars: int = 8_000
+    worktree: WorktreeConfig = field(default_factory=WorktreeConfig)
 
 
 class FileReadCacheProtocol(Protocol):
@@ -137,6 +173,8 @@ class ToolContext:
     timeout_seconds: float = 10.0
     max_output_chars: int = 20_000
     file_read_cache: FileReadCacheProtocol | None = None
+    process_environment: Mapping[str, str] | None = None
+    excluded_roots: tuple[Path, ...] = ()
 
 
 @dataclass(frozen=True)

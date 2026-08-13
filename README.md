@@ -212,11 +212,13 @@ denied_tools: []
 model: inherit
 max_iterations: 8
 permission_mode: strict
+# 可选；只允许显式写 worktree，省略表示共享主工作区。
+isolation: worktree
 ---
 你是只读代码审查 Agent。按严重程度报告可验证的问题。
 ```
 
-七个字段均必填，未知字段、重复 YAML key、空正文、非法工具或 `bypass` 权限都会使单个定义失效。`model` 可为 `inherit`、`haiku`、`sonnet`、`opus`；后三者必须在 `config.yaml` 的 `agents.model_aliases` 中映射到当前 Provider 的真实模型 ID。`permission_mode` 只允许 `inherit`、`default`、`strict`。
+前七个字段均必填；`isolation` 可省略，显式声明时只接受 `worktree`。未知字段、重复 YAML key、空正文、非法工具或 `bypass` 权限都会使单个定义失效。`model` 可为 `inherit`、`haiku`、`sonnet`、`opus`；后三者必须在 `config.yaml` 的 `agents.model_aliases` 中映射到当前 Provider 的真实模型 ID。`permission_mode` 只允许 `inherit`、`default`、`strict`。
 
 加载优先级固定为：
 
@@ -231,11 +233,19 @@ permission_mode: strict
 
 后台结束只打印一次终端通知，不自动调用主模型。结果进入所属主会话 inbox，在下一次真实用户请求前以带边界的普通 user 消息注入，并沿用现有 SessionJournal；完整结果可用 `Task get`，也可用 `Task list|get|wait|cancel` 管理当前会话任务。`Task wait` 有配置上限，超时不会取消任务；用户可用 `/tasks` 查看脱敏摘要。
 
-每个子 Agent 隔离消息、Token 累计、临时权限授权、文件读取缓存、取消状态和 Hook scope，同时复用 Provider 连接池、Hook 规则/动作引擎和同一工作区文件系统。子 Agent 不显示审批菜单：需要人工批准的调用会收到结构化拒绝并可继续改用安全方案。工具调用依次受全局禁令、角色白黑名单、Plan 只读限制、后台 allowlist、Hook 和独立权限限制；Defined 看不到 `Agent`、`Task`、`load_skill`，Fork 为缓存保留父工具 schema，但运行时同样硬拒绝这些调用，因此不能创建孙 Agent 或管理同级任务。
+每个子 Agent 隔离消息、Token 累计、临时权限授权、文件读取缓存、取消状态和 Hook scope，同时复用 Provider 连接池及 Hook 规则/动作引擎。子 Agent 不显示审批菜单：需要人工批准的调用会收到结构化拒绝并可继续改用安全方案。工具调用依次受全局禁令、角色白黑名单、Plan 只读限制、后台 allowlist、Hook 和独立权限限制；Defined 看不到 `Agent`、`Task`、`load_skill`，Fork 为缓存保留父工具 schema，但运行时同样硬拒绝这些调用，因此不能创建孙 Agent 或管理同级任务。
+
+声明 `isolation: worktree` 的定义式角色会从 `Agent` 调用时的当前 `HEAD` 创建独立 Git Worktree 与 `mewcode/worktree/<task-id>` 临时分支。目录固定在仓库内被忽略的 `.mycode/worktrees/tasks/<task-id>/`；主工作区未提交修改不会复制过去。Fork 和未声明隔离的定义式角色继续共享主工作区。
+
+Worktree 子任务的文件、搜索、命令、Git、Hook、项目指令、项目记忆和缓存都绑定到该绝对目录，不改变进程 cwd。初始化可按 `agents.worktree.initialization` 复制被忽略的本地文件、软链接大型依赖及注入独立 `core.hooksPath`；默认可选处理 `config.yaml`、本地权限/Hook 配置、`.venv` 和主仓库 hooks。初始化不运行任意脚本、安装或构建命令。
+
+创建前会确认仓库已忽略固定目录和身份标记；不满足时失败关闭且不修改 `.gitignore`。任务结束只有“无已跟踪修改、除仍与源匹配的受管初始化产物和身份标记外无其他未跟踪/ignored 文件、无新增 commit”时才自动清理。文件变化返回 `retained_changes`，任何新增 commit 都先返回 `retained_commits`，并在 `Task`、inbox 与 `/tasks` 中给出目录、分支和基线。上层完成 merge 或将提交送达到可靠的同名本地 remote-tracking ref 后，内部保护性清理才允许删除；Mycode 不自动 fetch、push、merge、rebase 或同步 Worktree。
+
+启动和周期 Janitor 只处理严格身份记录、超过阈值且通过路径/身份/状态三层过滤的候选；活动、陌生、不确定、有修改或有未合并且未送达 commit 的目录一律保留。所有 Git 检查有超时且只读本地引用。该机制是 Git 工作区隔离与常见误删除保护，不是容器或 OS 级恶意代码沙箱。
 
 `/new` 会取消旧会话任务并清空未投递 inbox；退出会在有界时间内取消任务并关闭共享基础设施。任务表、队列、未投递结果和独立权限审计不跨进程恢复；已经注入历史的结果只按普通消息恢复。
 
-本阶段不提供子 Agent Worktree/分支隔离、多 Agent 团队编排、任务依赖图、远程执行或后台任务跨会话/跨进程持久化。
+本阶段不提供 Worktree 自动合并/同步、Fork Worktree、多 Agent 团队编排、任务依赖图、远程执行或后台任务跨会话/跨进程持久化，也不提供面向用户或 LLM 的 Worktree 强制删除入口。
 
 ## 项目指令与长期记忆
 

@@ -27,7 +27,7 @@ class ReadFileTool:
 
     def run(self, arguments: Mapping[str, object], context: ToolContext) -> ToolResult | ToolExecutionResult:
         try:
-            path = resolve_workspace_path(context.workspace_root, require_str(arguments, "path"))
+            path = resolve_workspace_path(context.workspace_root, require_str(arguments, "path"), context.excluded_roots)
             if not path.exists():
                 return result_error("文件不存在。", path=str(path))
             if not path.is_file():
@@ -77,7 +77,7 @@ class WriteFileTool:
 
     def run(self, arguments: Mapping[str, object], context: ToolContext) -> ToolResult:
         try:
-            path = resolve_workspace_path(context.workspace_root, require_str(arguments, "path"))
+            path = resolve_workspace_path(context.workspace_root, require_str(arguments, "path"), context.excluded_roots)
             content = require_string(arguments, "content")
             path.parent.mkdir(parents=True, exist_ok=True)
             path.write_text(content, encoding="utf-8")
@@ -113,7 +113,7 @@ class EditFileTool:
 
     def run(self, arguments: Mapping[str, object], context: ToolContext) -> ToolResult:
         try:
-            path = resolve_workspace_path(context.workspace_root, require_str(arguments, "path"))
+            path = resolve_workspace_path(context.workspace_root, require_str(arguments, "path"), context.excluded_roots)
             old_text = require_str(arguments, "old_text")
             new_text = require_string(arguments, "new_text")
             if not path.exists():
