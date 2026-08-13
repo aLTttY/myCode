@@ -61,6 +61,36 @@ def test_command_allows_no_path_and_internal_path(tmp_path: Path) -> None:
     validate_command_paths("cat README.md", tmp_path)
 
 
+@pytest.mark.parametrize(
+    "command",
+    [
+        "rm -rf .mycode",
+        "rm -rf .m*",
+        "rm -rf .mycode/*",
+        "find . -delete",
+        "git clean -fdx",
+    ],
+)
+def test_command_rejects_destructive_ancestor_of_managed_worktrees(
+    tmp_path: Path, command: str
+) -> None:
+    excluded = tmp_path / ".mycode" / "worktrees"
+    excluded.mkdir(parents=True)
+
+    with pytest.raises(PermissionValidationError, match="Worktree"):
+        validate_command_paths(command, tmp_path, (excluded,))
+
+
+def test_command_allows_destructive_glob_unrelated_to_managed_root(
+    tmp_path: Path,
+) -> None:
+    excluded = tmp_path / ".mycode" / "worktrees"
+    excluded.mkdir(parents=True)
+
+    validate_command_paths("rm -f *.tmp", tmp_path, (excluded,))
+    validate_command_paths("rm -rf *", tmp_path, (excluded,))
+
+
 @pytest.mark.parametrize("value", ["../*", "/tmp/*", "~/docs/*"])
 def test_search_pattern_rejects_escape(value: str) -> None:
     with pytest.raises(PermissionValidationError):

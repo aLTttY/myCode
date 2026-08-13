@@ -107,3 +107,16 @@ def test_search_code_allows_symlink_to_internal_file(tmp_path: Path) -> None:
 
     assert result.ok
     assert result.data["matches"][0]["path"] == "target.txt"
+
+
+def test_search_tools_prune_excluded_worktree_root(tmp_path: Path) -> None:
+    managed = tmp_path / ".mycode" / "worktrees"
+    managed.mkdir(parents=True)
+    (managed / "secret.py").write_text("unique-worktree-secret", encoding="utf-8")
+    tool_context = ToolContext(tmp_path, excluded_roots=(managed,))
+
+    found = FindFilesTool().run({"pattern": "*.py"}, tool_context)
+    searched = SearchCodeTool().run({"query": "unique-worktree-secret"}, tool_context)
+
+    assert found.data["matches"] == []
+    assert searched.data["matches"] == []

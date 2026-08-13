@@ -135,9 +135,10 @@ class CoordinatedReadTool(RecordingTool):
     def run(self, arguments: Mapping[str, object], context: ToolContext) -> ToolResult:
         if self.spec.name == "read_file":
             assert self.release_first.wait(timeout=1)
-        else:
-            self.release_first.set()
-        return super().run(arguments, context)
+            return super().run(arguments, context)
+        result = super().run(arguments, context)
+        self.release_first.set()
+        return result
 
 
 def test_executor_runs_side_effect_batch_serially(tmp_path: Path) -> None:

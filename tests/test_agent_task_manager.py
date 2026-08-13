@@ -81,6 +81,8 @@ def test_session_ownership_cancel_and_clear_inbox() -> None:
     with pytest.raises(Exception, match="不属于当前会话"):
         manager.get_task("new", "one")
     assert manager.cancel_session("old", clear_inbox=True) == 1
+    assert manager.get_task("old", "one").snapshot.status in {"cancelling", "cancelled"}
+    assert manager.wait_session("old", 1.0) == 0
     assert manager.get_task("old", "one").snapshot.status == "cancelled"
     assert manager.take_inbox("old") == ()
     gate.set()

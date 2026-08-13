@@ -35,6 +35,25 @@ def test_command_runs_in_workspace_and_receives_payload_on_stdin(tmp_path: Path)
     assert (tmp_path / "hook-result.txt").read_text(encoding="utf-8") == "动态值"
 
 
+def test_command_accepts_scoped_workspace_and_environment(tmp_path: Path) -> None:
+    child = tmp_path / "child"
+    child.mkdir()
+    executor = HookActionExecutor(tmp_path)
+    try:
+        outcome = executor.execute(
+            CommandAction("printf \"$MEWCODE_HOOK_SCOPE\" > scoped.txt"),
+            event(),
+            workspace_root=child,
+            process_environment={"MEWCODE_HOOK_SCOPE": "child"},
+        )
+    finally:
+        executor.close()
+
+    assert outcome.status == "success"
+    assert (child / "scoped.txt").read_text(encoding="utf-8") == "child"
+    assert not (tmp_path / "scoped.txt").exists()
+
+
 def test_command_tool_before_exit_two_denies_with_bounded_stderr(tmp_path: Path) -> None:
     executor = HookActionExecutor(tmp_path)
     try:

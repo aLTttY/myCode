@@ -16,6 +16,21 @@ def test_run_command_success_and_cwd(tmp_path: Path) -> None:
     assert str(tmp_path) in str(result.data["stdout"])
 
 
+def test_run_command_merges_task_environment_without_chdir(tmp_path: Path) -> None:
+    before = Path.cwd()
+    result = RunCommandTool().run(
+        {"command": "printf \"$MEWCODE_WORKTREE_TEST\""},
+        ToolContext(
+            workspace_root=tmp_path,
+            process_environment={"MEWCODE_WORKTREE_TEST": "isolated"},
+        ),
+    )
+
+    assert result.ok
+    assert result.data["stdout"] == "isolated"
+    assert Path.cwd() == before
+
+
 def test_run_command_failure_returns_structured_result(tmp_path: Path) -> None:
     result = RunCommandTool().run({"command": "exit 7"}, context(tmp_path))
 

@@ -44,19 +44,27 @@ result = {
     "workspace": payload["context"]["workspace_root"],
     "cwd": os.getcwd(),
     "secret_present": "SENTINEL_API_KEY" in os.environ,
+    "overlay": os.environ.get("MEWCODE_TASK_OVERLAY"),
 }
 print(json.dumps({"ok": True, "message": "done", "data": result}))
 """,
     )
     tool = SkillScriptTool(_definition(script))
 
-    result = tool.run({"query": "中文"}, ToolContext(tmp_path))
+    result = tool.run(
+        {"query": "中文"},
+        ToolContext(
+            tmp_path,
+            process_environment={"MEWCODE_TASK_OVERLAY": "worktree"},
+        ),
+    )
 
     assert result.ok
     assert result.data["arguments"] == {"query": "中文"}
     assert result.data["workspace"] == str(tmp_path.resolve())
     assert result.data["cwd"] == str(tmp_path)
     assert result.data["secret_present"] is False
+    assert result.data["overlay"] == "worktree"
 
 
 @pytest.mark.parametrize(

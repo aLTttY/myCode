@@ -31,6 +31,39 @@ def test_parses_complete_agent_definition() -> None:
     assert definition.permission_mode == "strict"
     assert definition.system_prompt == "你是只读审查 Agent。\n请给出证据。"
     assert len(definition.fingerprint) == 64
+    assert definition.isolation == "shared"
+
+
+def test_parses_worktree_isolation() -> None:
+    definition = parse_agent_text(
+        VALID.replace("permission_mode: strict", "permission_mode: strict\nisolation: worktree"),
+        source="project",
+        source_id="role.md",
+    )
+
+    assert definition.isolation == "worktree"
+
+
+def test_rejects_invalid_isolation() -> None:
+    with pytest.raises(AgentDefinitionError) as caught:
+        parse_agent_text(
+            VALID.replace("permission_mode: strict", "permission_mode: strict\nisolation: container"),
+            source="project",
+            source_id="role.md",
+        )
+
+    assert caught.value.code == "invalid_isolation"
+
+
+def test_rejects_explicit_shared_isolation() -> None:
+    with pytest.raises(AgentDefinitionError) as caught:
+        parse_agent_text(
+            VALID.replace("permission_mode: strict", "permission_mode: strict\nisolation: shared"),
+            source="project",
+            source_id="role.md",
+        )
+
+    assert caught.value.code == "invalid_isolation"
 
 
 @pytest.mark.parametrize(

@@ -88,6 +88,71 @@ agents:
     assert config.agents.inbox_preview_chars == 1000
 
 
+def test_loads_worktree_config_and_rules(tmp_path: Path) -> None:
+    path = write_config(
+        tmp_path,
+        """
+protocol: deepseek
+model: demo
+base_url: https://example.com
+api_key: key
+agents:
+  worktree:
+    git_timeout_seconds: 2
+    cleanup_interval_seconds: 3
+    stale_after_seconds: 4
+    copy_max_files: 5
+    copy_max_bytes: 6
+    initialization:
+      - action: copy
+        source: config.yaml
+        target: config.yaml
+        required: true
+      - action: hooks
+        source: .git/hooks
+        required: false
+""",
+    )
+
+    worktree = load_project_config(path).agents.worktree
+
+    assert worktree.git_timeout_seconds == 2
+    assert worktree.cleanup_interval_seconds == 3
+    assert worktree.stale_after_seconds == 4
+    assert worktree.initialization[0].required
+    assert worktree.initialization[1].target is None
+
+
+@pytest.mark.parametrize(
+    "body",
+    [
+        "unknown: true",
+        "git_timeout_seconds: false",
+        "initialization: [{action: copy, source: ../secret, target: local}]",
+        "initialization: [{action: hooks, source: .git/hooks, target: hooks}]",
+        "initialization: [{action: copy, source: a, target: same}, {action: symlink, source: b, target: same}]",
+        "initialization: [{action: copy, source: a, target: local}, {action: copy, source: b, target: local/nested}]",
+        "initialization: [{action: copy, source: a, target: local/nested}, {action: copy, source: b, target: local}]",
+    ],
+)
+def test_rejects_invalid_worktree_config(tmp_path: Path, body: str) -> None:
+    path = write_config(
+        tmp_path,
+        f"""
+protocol: deepseek
+model: demo
+base_url: https://example.com
+api_key: key
+agents:
+  worktree:
+    {body}
+""",
+    )
+
+    with pytest.raises(ConfigError, match="worktree|initialization"):
+        load_project_config(path)
+
+
 @pytest.mark.parametrize(
     ("body", "match"),
     [
