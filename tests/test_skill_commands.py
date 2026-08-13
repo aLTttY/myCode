@@ -87,4 +87,4 @@ def test_dynamic_replace_updates_completion_and_removes_deleted_skill() -> None:
     registry.replace_dynamic(commands_from_snapshot(snapshot(definition("test"))))
 
     assert registry.resolve("commit") is None
-    assert [item.name for item in registry.completion_candidates("t")] == ["test"]
+    assert [item.name for item in registry.completion_candidates("t")] == ["tasks", "test"]

@@ -11,6 +11,7 @@ from .models import (
     RuntimeMode,
     SessionStatus,
     TokenStatus,
+    AgentTaskSummary,
 )
 
 
@@ -68,6 +69,9 @@ class CommandUI(Protocol):
         ...
 
     def new_session(self) -> None:
+        ...
+
+    def task_statuses(self) -> tuple[AgentTaskSummary, ...]:
         ...
 
     def refresh_status(self) -> None:

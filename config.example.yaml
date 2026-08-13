@@ -9,6 +9,29 @@ context_window_tokens: 128000
 tool_result_threshold_tokens: 8000
 tool_batch_threshold_tokens: 16000
 
+# 子 Agent 委派。模型档位只映射当前 Provider 的模型 ID；可按需省略未使用档位。
+agents:
+  model_aliases:
+    haiku: fast-model-id
+    sonnet: balanced-model-id
+    opus: strongest-model-id
+  background_allowed_tools:
+    - read_file
+    - find_files
+    - search_code
+    - read_git_changes
+  foreground_timeout_seconds: 30
+  task_wait_timeout_seconds: 30
+  task_wait_max_seconds: 300
+  shutdown_timeout_seconds: 5
+  max_concurrency: 4
+  max_queue_size: 32
+  inbox_preview_chars: 8000
+
+# Agent 角色位于项目 .mycode/agents/ 或用户 ~/.mycode/agents/；内置角色与
+# 由宿主注入的插件目录优先级更低。后台 allowlist 只能收紧执行面，不能放开
+# Agent、Task、load_skill 等全局禁止项，也不能跳过角色、Plan 或权限规则。
+
 # OpenAI 示例：
 # protocol: openai
 # model: gpt-4.1

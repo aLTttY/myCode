@@ -1,8 +1,10 @@
 from __future__ import annotations
 
 import os
+import math
 import re
 from pathlib import Path
+from types import MappingProxyType
 from typing import Any
 from urllib.parse import urlparse
 
@@ -10,6 +12,7 @@ import yaml
 
 from .tools.registry import is_valid_tool_name
 from .types import (
+    AgentDelegationConfig,
     AppConfig,
     ConfigError,
     ContextConfig,
@@ -33,6 +36,18 @@ RESERVED_HTTP_HEADERS = {
     "mcp-session-id",
     "mcp-protocol-version",
 }
+AGENT_CONFIG_FIELDS = {
+    "model_aliases",
+    "background_allowed_tools",
+    "foreground_timeout_seconds",
+    "task_wait_timeout_seconds",
+    "task_wait_max_seconds",
+    "shutdown_timeout_seconds",
+    "max_concurrency",
+    "max_queue_size",
+    "inbox_preview_chars",
+}
+MODEL_ALIAS_NAMES = {"haiku", "sonnet", "opus"}
 
 
 class UniqueKeyLoader(yaml.SafeLoader):
@@ -87,6 +102,7 @@ def load_config(
     thinking = _parse_thinking(raw.get("thinking"))
     mcp_servers = _merge_mcp_servers(user_raw, raw, resolved_user_path, config_path)
     context = _parse_context_config(raw)
+    agents = _parse_agent_config(raw.get("agents"))
 
     return AppConfig(
         protocol=protocol,
@@ -96,7 +112,135 @@ def load_config(
         thinking=thinking,
         mcp_servers=mcp_servers,
         context=context,
+        agents=agents,
     )
+
+
+def _parse_agent_config(value: Any) -> AgentDelegationConfig:
+    if value is None:
+        return AgentDelegationConfig()
+    if not isinstance(value, dict) or not all(isinstance(key, str) for key in value):
+        raise ConfigError("配置字段 `agents` 必须是对象。")
+    unknown = sorted(set(value) - AGENT_CONFIG_FIELDS)
+    if unknown:
+        raise ConfigError(f"配置字段 `agents` 包含未知字段：{', '.join(unknown)}。")
+
+    aliases_value = value.get("model_aliases", {})
+    if not isinstance(aliases_value, dict) or not all(
+        isinstance(key, str) for key in aliases_value
+    ):
+        raise ConfigError("配置字段 `agents.model_aliases` 必须是对象。")
+    unknown_aliases = sorted(set(aliases_value) - MODEL_ALIAS_NAMES)
+    if unknown_aliases:
+        raise ConfigError(
+            "配置字段 `agents.model_aliases` 包含未知档位："
+            f"{', '.join(unknown_aliases)}。"
+        )
+    aliases: dict[str, str] = {}
+    for tier, model_id in aliases_value.items():
+        if not isinstance(model_id, str) or not model_id.strip():
+            raise ConfigError(
+                f"配置字段 `agents.model_aliases.{tier}` 必须是非空字符串。"
+            )
+        aliases[tier] = model_id.strip()
+
+    defaults = AgentDelegationConfig()
+    background_allowed_tools = _agent_tool_list(
+        value.get("background_allowed_tools", defaults.background_allowed_tools)
+    )
+    foreground_timeout = _agent_positive_number(
+        value,
+        "foreground_timeout_seconds",
+        defaults.foreground_timeout_seconds,
+    )
+    wait_timeout = _agent_positive_number(
+        value,
+        "task_wait_timeout_seconds",
+        defaults.task_wait_timeout_seconds,
+    )
+    wait_max = _agent_positive_number(
+        value,
+        "task_wait_max_seconds",
+        defaults.task_wait_max_seconds,
+    )
+    if wait_timeout > wait_max:
+        raise ConfigError(
+            "配置字段 `agents.task_wait_timeout_seconds` 不得大于 "
+            "`agents.task_wait_max_seconds`。"
+        )
+    shutdown_timeout = _agent_positive_number(
+        value,
+        "shutdown_timeout_seconds",
+        defaults.shutdown_timeout_seconds,
+    )
+
+    return AgentDelegationConfig(
+        model_aliases=MappingProxyType(aliases),
+        background_allowed_tools=background_allowed_tools,
+        foreground_timeout_seconds=foreground_timeout,
+        task_wait_timeout_seconds=wait_timeout,
+        task_wait_max_seconds=wait_max,
+        shutdown_timeout_seconds=shutdown_timeout,
+        max_concurrency=_agent_bounded_int(
+            value, "max_concurrency", defaults.max_concurrency, minimum=1, maximum=32
+        ),
+        max_queue_size=_agent_bounded_int(
+            value, "max_queue_size", defaults.max_queue_size, minimum=0, maximum=1024
+        ),
+        inbox_preview_chars=_agent_bounded_int(
+            value,
+            "inbox_preview_chars",
+            defaults.inbox_preview_chars,
+            minimum=1_000,
+            maximum=20_000,
+        ),
+    )
+
+
+def _agent_tool_list(value: Any) -> tuple[str, ...]:
+    if not isinstance(value, list) and not isinstance(value, tuple):
+        raise ConfigError("配置字段 `agents.background_allowed_tools` 必须是工具名列表。")
+    if not all(isinstance(item, str) and is_valid_tool_name(item) for item in value):
+        raise ConfigError(
+            "配置字段 `agents.background_allowed_tools` 包含非法工具名。"
+        )
+    if len(set(value)) != len(value):
+        raise ConfigError(
+            "配置字段 `agents.background_allowed_tools` 不能包含重复工具名。"
+        )
+    forbidden = sorted(set(value) & {"Agent", "Task", "load_skill"})
+    if forbidden:
+        raise ConfigError(
+            "配置字段 `agents.background_allowed_tools` 不能包含子 Agent "
+            f"全局禁止工具：{', '.join(forbidden)}。"
+        )
+    return tuple(value)
+
+
+def _agent_positive_number(raw: dict[str, Any], key: str, default: float) -> float:
+    value = raw.get(key, default)
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        raise ConfigError(f"配置字段 `agents.{key}` 必须是有限正数。")
+    number = float(value)
+    if not math.isfinite(number) or number <= 0:
+        raise ConfigError(f"配置字段 `agents.{key}` 必须是有限正数。")
+    return number
+
+
+def _agent_bounded_int(
+    raw: dict[str, Any],
+    key: str,
+    default: int,
+    *,
+    minimum: int,
+    maximum: int,
+) -> int:
+    value = raw.get(key, default)
+    if type(value) is not int or not minimum <= value <= maximum:
+        raise ConfigError(
+            f"配置字段 `agents.{key}` 必须是 {minimum}–{maximum} 之间的整数。"
+        )
+    return value
 
 
 def _read_yaml(

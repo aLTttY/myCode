@@ -22,7 +22,7 @@ HookEventName = Literal[
 ]
 HookSource = Literal["user", "project", "local"]
 HookConditionOperator = Literal["all", "any"]
-HookResultSource = Literal["tool", "permission", "hook", "validation"]
+HookResultSource = Literal["tool", "permission", "hook", "validation", "policy"]
 
 HOOK_EVENT_NAMES: frozenset[str] = frozenset(
     {

@@ -8,7 +8,7 @@ ToolSafety = Literal["read", "side_effect"]
 READ_TOOLS = frozenset(
     {"read_file", "find_files", "search_code", "read_git_changes"}
 )
-SYSTEM_TOOLS = frozenset({"load_skill"})
+SYSTEM_TOOLS = frozenset({"load_skill", "Agent", "Task"})
 
 
 def is_read_tool(name: str) -> bool:

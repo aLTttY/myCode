@@ -12,7 +12,17 @@ from prompt_toolkit.shortcuts.prompt import CompleteStyle
 from .agent.cancellation import CancellationToken
 from .agent.config import AgentRequest
 from .agent.runner import AgentRunner
+from .agents.bridge import ParentRequestBridge
+from .agents.catalog import AgentCatalog
+from .agents.permissions import ChildPermissionFactory
+from .agents.provider_pool import ProviderPool
+from .agents.runner import ChildAgentExecutor
+from .agents.runtime import AgentRoleRuntime
+from .agents.tasks import AgentTaskManager
+from .agents.tools import AgentTool, TaskTool
+from .agents.waiting import PromptToolkitForegroundWaiter
 from .commands import (
+    AgentTaskSummary,
     ApplicationStatus,
     CommandDispatcher,
     CommandRegistrationError,
@@ -102,7 +112,8 @@ def main(argv: Sequence[str] | None = None) -> int:
         workspace_root = Path.cwd()
         config = load_config(Path(args.config))
         hook_snapshot = HookConfigLoader().load(workspace_root)
-        provider = create_provider(config)
+        provider_pool = ProviderPool(config, provider_builder=_create_pooled_provider)
+        provider = provider_pool.get(config.model)
         memory_provider = create_provider(config)
         tool_registry = create_default_registry()
         mcp_tool_prefixes = tuple(
@@ -116,6 +127,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     journal = None
     memory_worker = None
     hook_runtime: HookRuntime | None = None
+    task_manager: AgentTaskManager | None = None
     try:
         try:
             remote_tools, discovery_warnings = mcp_manager.discover()
@@ -212,6 +224,62 @@ def main(argv: Sequence[str] | None = None) -> int:
                 hook_actions,
                 _print_hook_diagnostic,
             )
+
+        agent_catalog = AgentCatalog(workspace_root)
+        role_runtime = AgentRoleRuntime()
+        request_bridge = ParentRequestBridge()
+        task_holder: dict[str, AgentTaskManager] = {}
+        child_executor = ChildAgentExecutor(
+            provider_supplier=provider_pool.get,
+            base_registry=tool_registry,
+            tool_context=ToolContext(workspace_root=workspace_root),
+            permission_factory=ChildPermissionFactory(
+                permission_service, mcp_tool_prefixes=mcp_tool_prefixes
+            ),
+            instruction_bundle=instruction_bundle,
+            hook_runtime=hook_runtime,
+            background_supplier=lambda task_id: task_holder["manager"].is_background(
+                task_id
+            ),
+        )
+        task_manager = AgentTaskManager(
+            child_executor.run,
+            max_concurrency=config.agents.max_concurrency,
+            max_queue_size=config.agents.max_queue_size,
+            inbox_preview_chars=config.agents.inbox_preview_chars,
+            notification_sink=_print_agent_notification,
+        )
+        task_holder["manager"] = task_manager
+        agent_holder: dict[str, AgentRunner] = {}
+        session_supplier = lambda: agent_holder["agent"].session_journal.session_id
+        tool_registry.register(
+            AgentTool(
+                role_runtime,
+                request_bridge,
+                task_manager,
+                session_supplier,
+                lambda: config.model,
+                config.agents,
+                PromptToolkitForegroundWaiter(),
+            )
+        )
+        tool_registry.register(
+            TaskTool(task_manager, session_supplier, config.agents)
+        )
+        unknown_background_tools = sorted(
+            set(config.agents.background_allowed_tools) - set(tool_registry.names())
+        )
+        if unknown_background_tools:
+            raise ConfigError(
+                "配置字段 `agents.background_allowed_tools` 包含未知工具："
+                f"{', '.join(unknown_background_tools)}。"
+            )
+        role_snapshot = agent_catalog.load_initial(
+            set(tool_registry.names()) | set(SYSTEM_TOOLS),
+            config.agents.model_aliases,
+        )
+        role_runtime.publish(role_snapshot)
+        _print_agent_diagnostics(role_snapshot.diagnostics)
         isolated_skill_runner = IsolatedSkillRunner(
             app_config=config,
             base_registry=tool_registry,
@@ -219,6 +287,9 @@ def main(argv: Sequence[str] | None = None) -> int:
             permission_service=permission_service,
             snapshot_supplier=lambda: skill_runtime.snapshot,
             instruction_bundle=instruction_bundle,
+            provider_factory=lambda provider_config: provider_pool.get(
+                provider_config.model
+            ),
         )
 
         # 创建 Agent 执行器：
@@ -238,7 +309,11 @@ def main(argv: Sequence[str] | None = None) -> int:
             skill_runtime=skill_runtime,
             isolated_skill_executor=isolated_skill_runner,
             hook_runtime=hook_runtime,
+            request_bridge=request_bridge,
+            task_manager=task_manager,
+            task_shutdown_timeout_seconds=config.agents.shutdown_timeout_seconds,
         )
+        agent_holder["agent"] = agent
         exit_reason = "fatal_error"
         if hook_runtime is not None:
             hook_runtime.begin_session(journal.session_id, session_origin)
@@ -257,11 +332,20 @@ def main(argv: Sequence[str] | None = None) -> int:
                 skill_catalog=skill_catalog,
                 skill_runtime=skill_runtime,
                 reserved_commands=reserved_commands,
+                agent_catalog=agent_catalog,
+                role_runtime=role_runtime,
             )
             return 0
         finally:
             if hook_runtime is not None:
                 hook_runtime.end_session(exit_reason)
+            if task_manager is not None:
+                report = task_manager.shutdown(config.agents.shutdown_timeout_seconds)
+                if report.unfinished:
+                    print(
+                        f"[agent] {report.unfinished} 个后台 worker 未在期限内结束。",
+                        file=sys.stderr,
+                    )
             close = getattr(agent, "close", None)
             warning = close() if close is not None else None
             if warning:
@@ -282,6 +366,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         if hook_runtime is not None:
             hook_runtime.close()
         mcp_manager.close()
+        provider_pool.close()
 
 
 def _print_hook_diagnostic(diagnostic: HookDiagnostic) -> None:
@@ -290,6 +375,32 @@ def _print_hook_diagnostic(diagnostic: HookDiagnostic) -> None:
         f"{diagnostic.event} {diagnostic.code}: {diagnostic.message}",
         file=sys.stderr,
     )
+
+
+def _create_pooled_provider(config, *, client):
+    try:
+        return create_provider(config, client=client)
+    except TypeError:
+        # 保留测试和第三方单参数 Provider factory 的兼容路径。
+        return create_provider(config)
+
+
+def _print_agent_notification(item) -> None:
+    role = item.role or "-"
+    print(
+        f"\n[agent] {item.task_id} type={item.kind} role={role} status={item.status}",
+        file=sys.stderr,
+        flush=True,
+    )
+
+
+def _print_agent_diagnostics(diagnostics) -> None:
+    for diagnostic in diagnostics:
+        print(
+            f"[agent] {diagnostic.level} {diagnostic.code}: "
+            f"{diagnostic.source_id} -> {diagnostic.message}",
+            file=sys.stderr,
+        )
 
 
 class TerminalCommandUI:
@@ -304,6 +415,7 @@ class TerminalCommandUI:
         workspace_root: Path,
         session_origin: str,
         permission_mode_override: str | None = None,
+        task_manager: AgentTaskManager | None = None,
     ) -> None:
         self.agent = agent
         self.config = config
@@ -317,6 +429,7 @@ class TerminalCommandUI:
         self._last_token_usage: TokenUsage | None = None
         self._permission_mode_override = permission_mode_override
         self._prompt_session: PromptSession[str] | None = None
+        self.task_manager = task_manager
 
     @property
     def current_mode(self) -> RuntimeMode:
@@ -469,6 +582,25 @@ class TerminalCommandUI:
         for warning in warnings:
             self.display_message(f"[session] {warning}", error=True)
 
+    def task_statuses(self) -> tuple[AgentTaskSummary, ...]:
+        if self.task_manager is None:
+            return ()
+        session_id = getattr(
+            getattr(self.agent, "session_journal", None), "session_id", ""
+        )
+        return tuple(
+            AgentTaskSummary(
+                task_id=item.task_id,
+                kind=item.kind,
+                role=item.role,
+                status=item.status,
+                delivery_mode=item.delivery_mode,
+                token_usage=item.token_usage,
+                failure_reason=item.failure_reason,
+            )
+            for item in self.task_manager.list_tasks(session_id)
+        )
+
     def refresh_status(self) -> None:
         session = self._prompt_session
         if session is not None and session.app.is_running:
@@ -505,6 +637,8 @@ def _run_interactive(
     skill_catalog: SkillCatalog | None = None,
     skill_runtime: SkillRuntime | None = None,
     reserved_commands: tuple[str, ...] = (),
+    agent_catalog: AgentCatalog | None = None,
+    role_runtime: AgentRoleRuntime | None = None,
 ) -> str:
     global _ACTIVE_PROMPT_SESSION
 
@@ -518,6 +652,7 @@ def _run_interactive(
         workspace_root,
         session_origin,
         permission_mode_override,
+        getattr(agent, "task_manager", None),
     )
     prompt_session: PromptSession[str] = PromptSession(
         completer=SlashCommandCompleter(command_registry),
@@ -558,6 +693,18 @@ def _run_interactive(
                         permission_service,
                         reserved_commands,
                     )
+
+            if agent_catalog is not None and role_runtime is not None:
+                active_registry = getattr(agent, "full_registry", None)
+                if active_registry is not None:
+                    report = agent_catalog.refresh(
+                        role_runtime.snapshot,
+                        set(active_registry.names()) | set(SYSTEM_TOOLS),
+                        config.agents.model_aliases,
+                    )
+                    if report.changed:
+                        role_runtime.publish(report.snapshot)
+                        _print_agent_diagnostics(report.snapshot.diagnostics)
 
             route = router.route(raw_text)
             if route.kind == "empty":

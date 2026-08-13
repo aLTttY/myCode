@@ -1,8 +1,9 @@
 from .interfaces import CommandExecutionError, CommandRegistrationError, CommandUI
-from .builtins import create_default_command_registry
+from .builtins import create_default_command_registry, format_agent_tasks
 from .completion import SlashCommandCompleter, create_slash_command_key_bindings
 from .models import (
     ApplicationStatus,
+    AgentTaskSummary,
     CommandInvocation,
     CommandSpec,
     CommandType,
@@ -19,6 +20,7 @@ from .router import CommandDispatcher, InputRouter
 
 __all__ = [
     "ApplicationStatus",
+    "AgentTaskSummary",
     "CommandExecutionError",
     "CommandInvocation",
     "CommandRegistrationError",
@@ -37,5 +39,6 @@ __all__ = [
     "SessionStatus",
     "TokenStatus",
     "create_default_command_registry",
+    "format_agent_tasks",
     "create_slash_command_key_bindings",
 ]

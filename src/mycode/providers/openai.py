@@ -11,8 +11,9 @@ from mycode.types import AppConfig, Message, ProviderError, StreamEvent, TokenUs
 
 
 class OpenAIProvider:
-    def __init__(self, config: AppConfig) -> None:
+    def __init__(self, config: AppConfig, *, client: httpx.Client | None = None) -> None:
         self.config = config
+        self._client = client
 
     def stream_chat(
         self,
@@ -26,10 +27,15 @@ class OpenAIProvider:
         url = f"{self.config.base_url}/chat/completions"
 
         try:
-            with httpx.Client(timeout=None) as client:
-                with client.stream("POST", url, headers=headers, json=payload) as response:
+            if self._client is not None:
+                with self._client.stream("POST", url, headers=headers, json=payload) as response:
                     _raise_for_status(response)
                     yield from self._iter_events(response)
+            else:
+                with httpx.Client(timeout=None) as client:
+                    with client.stream("POST", url, headers=headers, json=payload) as response:
+                        _raise_for_status(response)
+                        yield from self._iter_events(response)
         except ProviderError:
             raise
         except httpx.HTTPError as exc:

@@ -134,6 +134,7 @@ PYTHONPATH=src .venv/bin/python -m mycode --permission-mode strict
 | `/memory` | `/mem` | 显示两级记忆数量、索引路径和后台状态 |
 | `/permission` | `/perm` | 显示生效权限模式、来源和各层规则数量 |
 | `/status` | `/st` | 汇总模式、模型、权限、会话、Token、上下文和记忆状态 |
+| `/tasks` | 无 | 本地查看当前会话的子 Agent 任务、状态与用量 |
 | `/commit [要求]` | 无 | 加载内置共享 Skill，检查、验证并按权限创建 Git 提交 |
 | `/review [范围]` | `/rev` | 在独立、只读、无历史上下文中运行内置审查 Skill |
 | `/test [要求]` | 无 | 加载内置共享 Skill，识别并运行相关测试 |
@@ -192,6 +193,49 @@ script: lookup.py
 每个生效 Skill 会自动注册为 `/<name> [input]`，并出现在 `/help` 和 Tab 补全中。Mycode 在处理下一条输入前检查文件变化；新增、修改、删除、优先级覆盖和专属脚本更新无需重启。单个非法文件会被隔离并打印诊断，不阻断其他合法 Skill 更新。`/clear` 只清屏，不清除激活状态；`/new` 清除全部激活状态。内置样板为共享 `/commit`、独立只读 `/review`（别名 `/rev`）和共享 `/test`，都可以被项目或用户级同名定义覆盖。
 
 本阶段不包含 Skill 市场分发、远程安装或版本管理。
+
+## 子 Agent 委派
+
+主 Agent 始终拥有 schema 固定的 `Agent` 与 `Task` 两个控制工具。`Agent` 通过 `type: defined|fork` 选择两条路径：
+
+- 定义式需要 `role`，从空白消息历史、项目指令和角色系统提示开始，不继承父对话、激活 Skill、长期记忆或 journal。
+- Fork 式禁止 `role`，复制触发 `Agent` 调用前实际发送的父请求，包括 system、消息和原顺序工具 schema，再追加子任务 user 消息；它始终立即进入后台。首次请求不插入压缩或 Hook prompt，以保留可缓存前缀。
+
+角色是严格的 Markdown + YAML frontmatter 文件：
+
+```markdown
+---
+name: reviewer
+description: 只读审查当前工作区改动
+allowed_tools: [read_file, find_files, search_code, read_git_changes]
+denied_tools: []
+model: inherit
+max_iterations: 8
+permission_mode: strict
+---
+你是只读代码审查 Agent。按严重程度报告可验证的问题。
+```
+
+七个字段均必填，未知字段、重复 YAML key、空正文、非法工具或 `bypass` 权限都会使单个定义失效。`model` 可为 `inherit`、`haiku`、`sonnet`、`opus`；后三者必须在 `config.yaml` 的 `agents.model_aliases` 中映射到当前 Provider 的真实模型 ID。`permission_mode` 只允许 `inherit`、`default`、`strict`。
+
+加载优先级固定为：
+
+```text
+项目 <workspace>/.mycode/agents/ > 用户 ~/.mycode/agents/
+  > 内置 mycode.agents.builtins > 宿主按顺序注入的插件目录
+```
+
+启动时和每次主请求前都会检查增删改；已创建任务固定使用创建时快照。插件目录只通过 `AgentCatalog` 构造参数注入，不进行插件发现或安装；多个插件目录同名时先注入者生效并产生诊断。内置 `explore` 角色只允许四个只读工具。
+
+定义式默认前台等待 30 秒：期限内完成会直接返回结果和 Token/cache 用量；`background: true` 会立即返回任务 ID；超时或等待界面按 `Ctrl+B` 时，同一任务转为后台继续执行，不取消、不重启。所有任务由固定 worker 和 FIFO 队列托管，默认并发 4、额外排队 32，可在 `agents` 配置中调整。Fork 强制后台。
+
+后台结束只打印一次终端通知，不自动调用主模型。结果进入所属主会话 inbox，在下一次真实用户请求前以带边界的普通 user 消息注入，并沿用现有 SessionJournal；完整结果可用 `Task get`，也可用 `Task list|get|wait|cancel` 管理当前会话任务。`Task wait` 有配置上限，超时不会取消任务；用户可用 `/tasks` 查看脱敏摘要。
+
+每个子 Agent 隔离消息、Token 累计、临时权限授权、文件读取缓存、取消状态和 Hook scope，同时复用 Provider 连接池、Hook 规则/动作引擎和同一工作区文件系统。子 Agent 不显示审批菜单：需要人工批准的调用会收到结构化拒绝并可继续改用安全方案。工具调用依次受全局禁令、角色白黑名单、Plan 只读限制、后台 allowlist、Hook 和独立权限限制；Defined 看不到 `Agent`、`Task`、`load_skill`，Fork 为缓存保留父工具 schema，但运行时同样硬拒绝这些调用，因此不能创建孙 Agent 或管理同级任务。
+
+`/new` 会取消旧会话任务并清空未投递 inbox；退出会在有界时间内取消任务并关闭共享基础设施。任务表、队列、未投递结果和独立权限审计不跨进程恢复；已经注入历史的结果只按普通消息恢复。
+
+本阶段不提供子 Agent Worktree/分支隔离、多 Agent 团队编排、任务依赖图、远程执行或后台任务跨会话/跨进程持久化。
 
 ## 项目指令与长期记忆
 
@@ -324,7 +368,7 @@ hooks:
 - 工具级：`tool_before`、`tool_after`
 - 系统级：`context_compacted`、`agent_error`
 
-一次完整用户输入只产生一组轮次事件；模型流式增量和内部模型—工具迭代不会重复产生消息或轮次事件。`tool_after` 的 `result.source` 可区分 `tool`、`permission`、`hook` 和 `validation`。只有成功的自动/手动压缩产生 `context_compacted`；普通工具失败、权限/Hook 拒绝、取消和迭代上限不产生 `agent_error`。
+一次完整用户输入只产生一组轮次事件；模型流式增量和内部模型—工具迭代不会重复产生消息或轮次事件。`tool_after` 的 `result.source` 可区分 `tool`、`permission`、`hook`、`policy` 和 `validation`。子 Agent 事件额外带任务类型、任务 ID 和角色作用域。只有成功的自动/手动压缩产生 `context_compacted`；普通工具失败、权限/Hook 拒绝、取消和迭代上限不产生 `agent_error`。
 
 条件顶层必须且只能使用一个非空 `all` 或 `any` 列表，不支持嵌套或混用。条件项格式为 `字段(模式)`，使用与权限规则相同的精确、`glob:`、`re:` 和前置 `!` 语法，例如 `!tool.arguments.command(glob:safe/*)`。缺失字段、对象和数组不匹配，即使使用反向模式也不会变成命中。常用字段包括 `event`、`session.id`、`turn.mode`、`message.content`、`tool.name`、`tool.arguments.<路径>`、`result.ok`、`result.source` 和 `result.data.<路径>`；启动校验会拒绝当前事件不可用的字段。
 

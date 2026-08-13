@@ -47,14 +47,22 @@ class HookRuntime:
         event_factory: HookEventFactory,
         action_executor: HookActionExecutor | None = None,
         diagnostic_sink: DiagnosticSink | None = None,
+        *,
+        _shared_once: tuple[set[str], set[str], threading.RLock] | None = None,
+        _owns_action_executor: bool = True,
     ) -> None:
         self.snapshot = snapshot
         self.events = event_factory
         self.action_executor = action_executor
         self._diagnostic_sink = diagnostic_sink or (lambda diagnostic: None)
-        self._lock = threading.RLock()
-        self._consumed_once: set[str] = set()
-        self._in_flight_once: set[str] = set()
+        if _shared_once is None:
+            self._consumed_once = set()
+            self._in_flight_once = set()
+            self._lock = threading.RLock()
+            self._owns_once_state = True
+        else:
+            self._consumed_once, self._in_flight_once, self._lock = _shared_once
+            self._owns_once_state = False
         self._prompts: list[_QueuedPrompt] = []
         self._active_lease: _ActiveLease | None = None
         self._prompt_sequence = 0
@@ -62,13 +70,36 @@ class HookRuntime:
         self._turn_sequence = 0
         self._session_active = False
         self._closed = False
+        self._owns_action_executor = _owns_action_executor
+
+    def fork_scope(
+        self,
+        session_id: str,
+        scope_id: str,
+        *,
+        kind: str,
+        role: str = "",
+    ) -> "HookRuntime":
+        events = HookEventFactory(self.events.workspace_root, clock=self.events.clock)
+        events.set_agent_scope(kind, task_id=scope_id, role=role)
+        scope = HookRuntime(
+            self.snapshot,
+            events,
+            self.action_executor,
+            self._diagnostic_sink,
+            _shared_once=(self._consumed_once, self._in_flight_once, self._lock),
+            _owns_action_executor=False,
+        )
+        scope.begin_session(session_id, kind)
+        return scope
 
     def begin_session(self, session_id: str, origin: str) -> None:
         with self._lock:
             if self._closed:
                 return
-            self._consumed_once.clear()
-            self._in_flight_once.clear()
+            if self._owns_once_state:
+                self._consumed_once.clear()
+                self._in_flight_once.clear()
             self._prompts.clear()
             self._active_lease = None
             self._prompt_sequence = 0
@@ -184,7 +215,7 @@ class HookRuntime:
             if self._closed:
                 return
             self._closed = True
-        if self.action_executor is not None:
+        if self._owns_action_executor and self.action_executor is not None:
             try:
                 self.action_executor.close()
             except Exception:  # noqa: BLE001 - Hook 清理不得影响宿主退出。

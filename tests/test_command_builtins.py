@@ -7,6 +7,7 @@ import pytest
 
 from mycode.commands.builtins import create_default_command_registry
 from mycode.commands.models import (
+    AgentTaskSummary,
     ApplicationStatus,
     MemoryStatus,
     PermissionSourceStatus,
@@ -112,6 +113,10 @@ class FakeCommandUI:
     def new_session(self) -> None:
         self.calls.append("new")
 
+    def task_statuses(self):
+        self.calls.append("task_statuses")
+        return ()
+
     def refresh_status(self) -> None:
         self.calls.append("refresh")
 
@@ -145,13 +150,28 @@ def test_builtin_catalog_has_expected_order_metadata_and_types() -> None:
 
     assert [command.name for command in commands] == [
         "help", "compact", "clear", "plan", "do", "session", "memory",
-        "permission", "status", "new",
+        "permission", "status", "new", "tasks",
     ]
-    assert len(registry.commands()) == 9
-    assert commands[-1].hidden is True
+    assert len(registry.commands()) == 10
+    assert commands[-2].hidden is True
     assert all(command.description and command.usage for command in commands)
     assert all(command.handler is not None for command in commands)
     assert {command.command_type for command in commands} == {"local", "ui"}
+
+
+def test_tasks_is_local_readonly_summary() -> None:
+    ui = FakeCommandUI()
+    ui.task_statuses = lambda: (
+        AgentTaskSummary(
+            "agt_1", "fork", None, "completed", "background",
+            TokenUsage(total_tokens=7),
+        ),
+    )
+
+    result = _execute("/tasks", ui)
+
+    assert "agt_1" in result.messages[-1][0]
+    assert "total=7" in result.messages[-1][0]
 
 
 @pytest.mark.parametrize(

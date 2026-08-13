@@ -40,6 +40,86 @@ api_key: ${TEST_API_KEY}
     assert config.context.window_tokens == 200_000
     assert config.context.tool_result_threshold_tokens == 8_000
     assert config.context.tool_batch_threshold_tokens == 16_000
+    assert config.agents.max_concurrency == 4
+    assert config.agents.max_queue_size == 32
+    assert config.agents.foreground_timeout_seconds == 30.0
+
+
+def test_loads_agent_delegation_config(tmp_path: Path) -> None:
+    path = write_config(
+        tmp_path,
+        """
+protocol: deepseek
+model: demo
+base_url: https://example.com
+api_key: key
+agents:
+  model_aliases:
+    haiku: fast-model
+    opus: strong-model
+  background_allowed_tools: [read_file, search_code, custom_read]
+  foreground_timeout_seconds: 12.5
+  task_wait_timeout_seconds: 20
+  task_wait_max_seconds: 40
+  shutdown_timeout_seconds: 2
+  max_concurrency: 8
+  max_queue_size: 0
+  inbox_preview_chars: 1000
+""",
+    )
+
+    config = load_project_config(path)
+
+    assert dict(config.agents.model_aliases) == {
+        "haiku": "fast-model",
+        "opus": "strong-model",
+    }
+    assert config.agents.background_allowed_tools == (
+        "read_file",
+        "search_code",
+        "custom_read",
+    )
+    assert config.agents.foreground_timeout_seconds == 12.5
+    assert config.agents.task_wait_timeout_seconds == 20.0
+    assert config.agents.task_wait_max_seconds == 40.0
+    assert config.agents.shutdown_timeout_seconds == 2.0
+    assert config.agents.max_concurrency == 8
+    assert config.agents.max_queue_size == 0
+    assert config.agents.inbox_preview_chars == 1000
+
+
+@pytest.mark.parametrize(
+    ("body", "match"),
+    [
+        ("unknown: true", "未知字段"),
+        ("max_concurrency: false", "max_concurrency"),
+        ("max_concurrency: 33", "max_concurrency"),
+        ("max_queue_size: -1", "max_queue_size"),
+        ("inbox_preview_chars: 999", "inbox_preview_chars"),
+        ("foreground_timeout_seconds: .inf", "foreground_timeout_seconds"),
+        ("task_wait_timeout_seconds: 31\n  task_wait_max_seconds: 30", "不得大于"),
+        ("background_allowed_tools: [read_file, read_file]", "重复"),
+        ("background_allowed_tools: [Agent]", "全局禁止"),
+        ("model_aliases: {fast: model}", "未知档位"),
+    ],
+)
+def test_rejects_invalid_agent_delegation_config(
+    tmp_path: Path, body: str, match: str
+) -> None:
+    path = write_config(
+        tmp_path,
+        f"""
+protocol: deepseek
+model: demo
+base_url: https://example.com
+api_key: key
+agents:
+  {body}
+""",
+    )
+
+    with pytest.raises(ConfigError, match=match):
+        load_project_config(path)
 
 
 def test_loads_context_threshold_overrides(tmp_path: Path) -> None:

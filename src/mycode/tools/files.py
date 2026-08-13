@@ -32,7 +32,15 @@ class ReadFileTool:
                 return result_error("文件不存在。", path=str(path))
             if not path.is_file():
                 return result_error("目标路径不是文件。", path=str(path))
-            full_content = path.read_text(encoding="utf-8")
+            full_content = (
+                context.file_read_cache.get(path)
+                if context.file_read_cache is not None
+                else None
+            )
+            if full_content is None:
+                full_content = path.read_text(encoding="utf-8")
+                if context.file_read_cache is not None:
+                    context.file_read_cache.put(path, full_content)
             content, truncated = truncate_text(full_content, context.max_output_chars)
             display = result_ok("文件读取成功。", path=str(path), content=content, size=path.stat().st_size, truncated=truncated)
             if not truncated:
@@ -73,6 +81,8 @@ class WriteFileTool:
             content = require_string(arguments, "content")
             path.parent.mkdir(parents=True, exist_ok=True)
             path.write_text(content, encoding="utf-8")
+            if context.file_read_cache is not None:
+                context.file_read_cache.invalidate(path)
             return result_ok("文件写入成功。", path=str(path), chars=len(content))
         except ToolError as exc:
             return result_error(exc.user_message)
@@ -114,6 +124,8 @@ class EditFileTool:
                 return result_error(f"old_text 匹配次数为 {count}，必须恰好为 1。", path=str(path), matches=count)
             updated = content.replace(old_text, new_text, 1)
             path.write_text(updated, encoding="utf-8")
+            if context.file_read_cache is not None:
+                context.file_read_cache.invalidate(path)
             return result_ok("文件修改成功。", path=str(path), replacements=1)
         except ToolError as exc:
             return result_error(exc.user_message)

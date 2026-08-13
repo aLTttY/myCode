@@ -3,7 +3,42 @@ from __future__ import annotations
 from collections.abc import Mapping
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Literal
+from types import MappingProxyType
+from typing import Literal, Protocol
+
+
+DEFAULT_BACKGROUND_AGENT_TOOLS = (
+    "read_file",
+    "find_files",
+    "search_code",
+    "read_git_changes",
+)
+
+
+@dataclass(frozen=True)
+class AgentDelegationConfig:
+    model_aliases: Mapping[str, str] = field(
+        default_factory=lambda: MappingProxyType({})
+    )
+    background_allowed_tools: tuple[str, ...] = DEFAULT_BACKGROUND_AGENT_TOOLS
+    foreground_timeout_seconds: float = 30.0
+    task_wait_timeout_seconds: float = 30.0
+    task_wait_max_seconds: float = 300.0
+    shutdown_timeout_seconds: float = 5.0
+    max_concurrency: int = 4
+    max_queue_size: int = 32
+    inbox_preview_chars: int = 8_000
+
+
+class FileReadCacheProtocol(Protocol):
+    def get(self, path: Path) -> str | None:
+        ...
+
+    def put(self, path: Path, content: str) -> None:
+        ...
+
+    def invalidate(self, path: Path) -> None:
+        ...
 
 @dataclass(frozen=True)
 class ThinkingConfig:
@@ -49,6 +84,7 @@ class AppConfig:
     context: ContextConfig = field(
         default_factory=lambda: ContextConfig(window_tokens=128_000)
     )
+    agents: AgentDelegationConfig = field(default_factory=AgentDelegationConfig)
 
 
 @dataclass(frozen=True)
@@ -100,6 +136,7 @@ class ToolContext:
     workspace_root: Path
     timeout_seconds: float = 10.0
     max_output_chars: int = 20_000
+    file_read_cache: FileReadCacheProtocol | None = None
 
 
 @dataclass(frozen=True)

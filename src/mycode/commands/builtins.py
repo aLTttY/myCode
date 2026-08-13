@@ -12,6 +12,7 @@ from .models import (
     PermissionStatus,
     SessionStatus,
     TokenStatus,
+    AgentTaskSummary,
 )
 from .registry import CommandRegistry
 
@@ -106,6 +107,14 @@ def _builtin_commands() -> tuple[CommandSpec, ...]:
             command_type="local",
             hidden=True,
             handler=_handle_new,
+        ),
+        CommandSpec(
+            name="tasks",
+            aliases=(),
+            description="显示当前会话的子 Agent 任务",
+            usage="/tasks",
+            command_type="local",
+            handler=_handle_tasks,
         ),
     )
 
@@ -249,6 +258,30 @@ def _handle_new(
 ) -> None:
     _require_no_arguments(invocation)
     ui.new_session()
+
+
+def _handle_tasks(
+    invocation: CommandInvocation,
+    registry: CommandRegistry,
+    ui: CommandUI,
+) -> None:
+    _require_no_arguments(invocation)
+    ui.display_message(format_agent_tasks(ui.task_statuses()))
+
+
+def format_agent_tasks(tasks: tuple[AgentTaskSummary, ...]) -> str:
+    if not tasks:
+        return "当前会话没有子 Agent 任务。"
+    rows = ["子 Agent 任务："]
+    for task in tasks:
+        role = task.role or "-"
+        usage = format_token_usage(task.token_usage)
+        suffix = f" failure={task.failure_reason}" if task.failure_reason else ""
+        rows.append(
+            f"  {task.task_id} type={task.kind} role={role} "
+            f"status={task.status} delivery={task.delivery_mode} usage={usage}{suffix}"
+        )
+    return "\n".join(rows)
 
 
 def format_token_usage(usage: TokenUsage | None) -> str:

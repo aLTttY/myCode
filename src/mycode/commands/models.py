@@ -108,3 +108,14 @@ class ApplicationStatus:
     session: SessionStatus
     memory: MemoryStatus
     permission: PermissionStatus
+
+
+@dataclass(frozen=True)
+class AgentTaskSummary:
+    task_id: str
+    kind: str
+    role: str | None
+    status: str
+    delivery_mode: str
+    token_usage: TokenUsage | None
+    failure_reason: str = ""

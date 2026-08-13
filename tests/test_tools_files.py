@@ -1,6 +1,7 @@
 from pathlib import Path
 
 from mycode.tools.files import EditFileTool, ReadFileTool, WriteFileTool
+from mycode.tools.file_cache import FileReadCache
 from mycode.types import ToolContext
 
 
@@ -30,6 +31,31 @@ def test_read_file_preserves_complete_view_before_truncation(tmp_path: Path) -> 
     assert result.display.data["truncated"] is True
     assert result.complete.data["content"] == "abcdefghij"
     assert result.complete.data["truncated"] is False
+
+
+def test_file_read_cache_hits_and_invalidates_on_write(tmp_path: Path) -> None:
+    path = tmp_path / "cached.txt"
+    path.write_text("old", encoding="utf-8")
+    cache = FileReadCache()
+    cached_context = ToolContext(tmp_path, file_read_cache=cache)
+
+    assert ReadFileTool().run({"path": "cached.txt"}, cached_context).data["content"] == "old"
+    assert cache.get(path) == "old"
+    WriteFileTool().run({"path": "cached.txt", "content": "new"}, cached_context)
+    assert cache.get(path) is None
+    assert ReadFileTool().run({"path": "cached.txt"}, cached_context).data["content"] == "new"
+
+
+def test_file_read_cache_detects_external_change_and_is_per_context(tmp_path: Path) -> None:
+    path = tmp_path / "external.txt"
+    path.write_text("old", encoding="utf-8")
+    first = FileReadCache()
+    second = FileReadCache()
+    first.put(path, "old")
+
+    assert second.get(path) is None
+    path.write_text("new and longer", encoding="utf-8")
+    assert first.get(path) is None
 
 
 def test_file_tools_reject_outside_path(tmp_path: Path) -> None:

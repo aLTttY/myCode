@@ -27,6 +27,9 @@ class HookEventFactory:
         self.session_id = ""
         self.session_origin = "new"
         self.turn: HookTurn | None = None
+        self.agent_kind = "main"
+        self.agent_task_id = ""
+        self.agent_role = ""
 
     def set_session(self, session_id: str, origin: str) -> None:
         self.session_id = session_id
@@ -34,6 +37,17 @@ class HookEventFactory:
 
     def set_turn(self, turn: HookTurn | None) -> None:
         self.turn = turn
+
+    def set_agent_scope(
+        self,
+        kind: str,
+        *,
+        task_id: str = "",
+        role: str = "",
+    ) -> None:
+        self.agent_kind = kind
+        self.agent_task_id = task_id
+        self.agent_role = role
 
     def build(
         self,
@@ -60,6 +74,12 @@ class HookEventFactory:
                 "origin": self.session_origin,
             },
         }
+        if self.agent_kind != "main":
+            payload["agent"] = {
+                "kind": self.agent_kind,
+                "task_id": self.agent_task_id,
+                "role": self.agent_role,
+            }
         if name == "session_end":
             payload["session"]["end_reason"] = end_reason  # type: ignore[index]
         if self.turn is not None and name not in {"session_start", "session_end"}:

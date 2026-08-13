@@ -62,6 +62,11 @@ class ToolExecutor:
             )
 
         try:
+            if getattr(tool, "manages_own_timeout", False):
+                result = tool.run(call.arguments, self.context)
+                if isinstance(result, ToolExecutionResult):
+                    return ToolExecutionRecord(result, "tool")
+                return ToolExecutionRecord(ToolExecutionResult.same(result), "tool")
             executor = ThreadPoolExecutor(max_workers=1)
             future = executor.submit(tool.run, call.arguments, self.context)
             try:

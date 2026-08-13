@@ -377,6 +377,8 @@ def test_cli_all_mcp_servers_can_fail_without_blocking_local_tools(
         "find_files",
         "search_code",
         "read_git_changes",
+        "Agent",
+        "Task",
     ]
     assert "[mcp] alpha initialize 失败：初始化失败" in capsys.readouterr().err
 
