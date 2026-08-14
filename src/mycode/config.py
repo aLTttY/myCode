@@ -20,6 +20,9 @@ from .types import (
     MCPServerConfig,
     StdioMCPServerConfig,
     ThinkingConfig,
+    TeamConfig,
+    CoordinatorConfig,
+    VerificationCommand,
     WorktreeConfig,
     WorktreeInitRule,
 )
@@ -60,6 +63,27 @@ WORKTREE_CONFIG_FIELDS = {
 }
 WORKTREE_RULE_FIELDS = {"action", "source", "target", "required"}
 MODEL_ALIAS_NAMES = {"haiku", "sonnet", "opus"}
+TEAM_CONFIG_FIELDS = {
+    "max_members",
+    "max_tasks",
+    "max_dependencies_per_task",
+    "max_message_chars",
+    "message_summary_chars",
+    "mailbox_batch_size",
+    "max_mailbox_bytes",
+    "max_context_bytes",
+    "max_work_log_entries",
+    "lock_timeout_seconds",
+    "shutdown_timeout_seconds",
+    "backend_start_timeout_seconds",
+    "integration_timeout_seconds",
+    "verification_commands",
+    "coordinator",
+}
+VERIFICATION_COMMAND_FIELDS = {"id", "argv", "timeout_seconds"}
+COORDINATOR_FIELDS = {"enabled"}
+COMMAND_ID_PATTERN = re.compile(r"^[a-z][a-z0-9_-]{0,63}$")
+SHELL_CONTROL_PATTERN = re.compile(r"[\x00\r\n;&|<>`$]")
 
 
 class UniqueKeyLoader(yaml.SafeLoader):
@@ -115,6 +139,7 @@ def load_config(
     mcp_servers = _merge_mcp_servers(user_raw, raw, resolved_user_path, config_path)
     context = _parse_context_config(raw)
     agents = _parse_agent_config(raw.get("agents"))
+    teams = _parse_team_config(raw.get("teams"))
 
     return AppConfig(
         protocol=protocol,
@@ -125,7 +150,149 @@ def load_config(
         mcp_servers=mcp_servers,
         context=context,
         agents=agents,
+        teams=teams,
     )
+
+
+def _parse_team_config(value: Any) -> TeamConfig:
+    defaults = TeamConfig()
+    if value is None:
+        return defaults
+    if not isinstance(value, dict) or not all(isinstance(key, str) for key in value):
+        raise ConfigError("配置字段 `teams` 必须是对象。")
+    unknown = sorted(set(value) - TEAM_CONFIG_FIELDS)
+    if unknown:
+        raise ConfigError(f"配置字段 `teams` 包含未知字段：{', '.join(unknown)}。")
+
+    coordinator_value = value.get("coordinator", {})
+    if not isinstance(coordinator_value, dict) or not all(
+        isinstance(key, str) for key in coordinator_value
+    ):
+        raise ConfigError("配置字段 `teams.coordinator` 必须是对象。")
+    unknown_coordinator = sorted(set(coordinator_value) - COORDINATOR_FIELDS)
+    if unknown_coordinator:
+        raise ConfigError(
+            "配置字段 `teams.coordinator` 包含未知字段："
+            f"{', '.join(unknown_coordinator)}。"
+        )
+    coordinator_enabled = coordinator_value.get("enabled", False)
+    if not isinstance(coordinator_enabled, bool):
+        raise ConfigError("配置字段 `teams.coordinator.enabled` 必须是布尔值。")
+
+    commands_value = value.get("verification_commands", ())
+    if not isinstance(commands_value, (list, tuple)):
+        raise ConfigError("配置字段 `teams.verification_commands` 必须是列表。")
+    commands: list[VerificationCommand] = []
+    command_ids: set[str] = set()
+    for index, item in enumerate(commands_value):
+        prefix = f"teams.verification_commands[{index}]"
+        if not isinstance(item, dict) or not all(isinstance(key, str) for key in item):
+            raise ConfigError(f"配置字段 `{prefix}` 必须是对象。")
+        unknown_command = sorted(set(item) - VERIFICATION_COMMAND_FIELDS)
+        if unknown_command:
+            raise ConfigError(
+                f"配置字段 `{prefix}` 包含未知字段：{', '.join(unknown_command)}。"
+            )
+        command_id = item.get("id")
+        if not isinstance(command_id, str) or COMMAND_ID_PATTERN.fullmatch(command_id) is None:
+            raise ConfigError(f"配置字段 `{prefix}.id` 必须是安全的非空命令 ID。")
+        if command_id in command_ids:
+            raise ConfigError(f"验证命令 ID `{command_id}` 重复。")
+        argv = item.get("argv")
+        if not isinstance(argv, list) or not argv or not all(
+            isinstance(arg, str) and arg and len(arg) <= 4096 for arg in argv
+        ):
+            raise ConfigError(f"配置字段 `{prefix}.argv` 必须是非空字符串列表。")
+        if len(argv) > 128 or any(
+            SHELL_CONTROL_PATTERN.search(arg) is not None or ENV_REFERENCE_PATTERN.search(arg)
+            for arg in argv
+        ):
+            raise ConfigError(f"配置字段 `{prefix}.argv` 包含 shell 控制符或环境展开。")
+        timeout = _team_positive_number(
+            item,
+            "timeout_seconds",
+            defaults.integration_timeout_seconds,
+            prefix=prefix,
+            maximum=3_600.0,
+        )
+        commands.append(VerificationCommand(command_id, tuple(argv), timeout))
+        command_ids.add(command_id)
+
+    return TeamConfig(
+        max_members=_team_bounded_int(value, "max_members", defaults.max_members, 1, 32),
+        max_tasks=_team_bounded_int(value, "max_tasks", defaults.max_tasks, 1, 10_000),
+        max_dependencies_per_task=_team_bounded_int(
+            value, "max_dependencies_per_task", defaults.max_dependencies_per_task, 0, 128
+        ),
+        max_message_chars=_team_bounded_int(
+            value, "max_message_chars", defaults.max_message_chars, 1, 100_000
+        ),
+        message_summary_chars=_team_bounded_int(
+            value, "message_summary_chars", defaults.message_summary_chars, 32, 1_000
+        ),
+        mailbox_batch_size=_team_bounded_int(
+            value, "mailbox_batch_size", defaults.mailbox_batch_size, 1, 500
+        ),
+        max_mailbox_bytes=_team_bounded_int(
+            value, "max_mailbox_bytes", defaults.max_mailbox_bytes, 1024**2, 1024**3
+        ),
+        max_context_bytes=_team_bounded_int(
+            value, "max_context_bytes", defaults.max_context_bytes, 1024**2, 2 * 1024**3
+        ),
+        max_work_log_entries=_team_bounded_int(
+            value, "max_work_log_entries", defaults.max_work_log_entries, 1, 10_000
+        ),
+        lock_timeout_seconds=_team_positive_number(
+            value, "lock_timeout_seconds", defaults.lock_timeout_seconds, maximum=300.0
+        ),
+        shutdown_timeout_seconds=_team_positive_number(
+            value, "shutdown_timeout_seconds", defaults.shutdown_timeout_seconds, maximum=300.0
+        ),
+        backend_start_timeout_seconds=_team_positive_number(
+            value,
+            "backend_start_timeout_seconds",
+            defaults.backend_start_timeout_seconds,
+            maximum=300.0,
+        ),
+        integration_timeout_seconds=_team_positive_number(
+            value,
+            "integration_timeout_seconds",
+            defaults.integration_timeout_seconds,
+            maximum=3_600.0,
+        ),
+        verification_commands=tuple(commands),
+        coordinator=CoordinatorConfig(enabled=coordinator_enabled),
+    )
+
+
+def _team_bounded_int(
+    raw: dict[str, Any], key: str, default: int, minimum: int, maximum: int
+) -> int:
+    value = raw.get(key, default)
+    if type(value) is not int or not minimum <= value <= maximum:
+        raise ConfigError(
+            f"配置字段 `teams.{key}` 必须是 {minimum}–{maximum} 之间的整数。"
+        )
+    return value
+
+
+def _team_positive_number(
+    raw: dict[str, Any],
+    key: str,
+    default: float,
+    *,
+    prefix: str = "teams",
+    maximum: float,
+) -> float:
+    value = raw.get(key, default)
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        raise ConfigError(f"配置字段 `{prefix}.{key}` 必须是有限正数。")
+    number = float(value)
+    if not math.isfinite(number) or number <= 0 or number > maximum:
+        raise ConfigError(
+            f"配置字段 `{prefix}.{key}` 必须是 0–{maximum} 之间的有限正数。"
+        )
+    return number
 
 
 def _parse_agent_config(value: Any) -> AgentDelegationConfig:

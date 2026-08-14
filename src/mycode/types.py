@@ -66,6 +66,37 @@ class AgentDelegationConfig:
     worktree: WorktreeConfig = field(default_factory=WorktreeConfig)
 
 
+@dataclass(frozen=True)
+class VerificationCommand:
+    command_id: str
+    argv: tuple[str, ...]
+    timeout_seconds: float = 300.0
+
+
+@dataclass(frozen=True)
+class CoordinatorConfig:
+    enabled: bool = False
+
+
+@dataclass(frozen=True)
+class TeamConfig:
+    max_members: int = 8
+    max_tasks: int = 1_000
+    max_dependencies_per_task: int = 32
+    max_message_chars: int = 20_000
+    message_summary_chars: int = 240
+    mailbox_batch_size: int = 50
+    max_mailbox_bytes: int = 52_428_800
+    max_context_bytes: int = 104_857_600
+    max_work_log_entries: int = 1_000
+    lock_timeout_seconds: float = 5.0
+    shutdown_timeout_seconds: float = 5.0
+    backend_start_timeout_seconds: float = 10.0
+    integration_timeout_seconds: float = 300.0
+    verification_commands: tuple[VerificationCommand, ...] = ()
+    coordinator: CoordinatorConfig = field(default_factory=CoordinatorConfig)
+
+
 class FileReadCacheProtocol(Protocol):
     def get(self, path: Path) -> str | None:
         ...
@@ -121,6 +152,7 @@ class AppConfig:
         default_factory=lambda: ContextConfig(window_tokens=128_000)
     )
     agents: AgentDelegationConfig = field(default_factory=AgentDelegationConfig)
+    teams: TeamConfig = field(default_factory=TeamConfig)
 
 
 @dataclass(frozen=True)

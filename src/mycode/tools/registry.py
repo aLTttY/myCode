@@ -53,6 +53,24 @@ class ToolRegistry:
     def copy(self) -> ToolRegistry:
         return self.subset(self.names())
 
+    def exclude(self, names: Iterable[str]) -> ToolRegistry:
+        excluded = set(names)
+        return self.subset(name for name in self.names() if name not in excluded)
+
+    def replace(self, tool: Tool) -> ToolRegistry:
+        name = tool.spec.name
+        registry = ToolRegistry()
+        replaced = False
+        for existing in self.names():
+            if existing == name:
+                registry.register(tool)
+                replaced = True
+            else:
+                registry.register(self.get(existing))
+        if not replaced:
+            registry.register(tool)
+        return registry
+
     def merge(self, *others: ToolRegistry) -> ToolRegistry:
         registry = self.copy()
         for other in others:

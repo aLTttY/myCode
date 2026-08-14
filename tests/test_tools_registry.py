@@ -81,3 +81,13 @@ def test_registry_merge_rejects_duplicate() -> None:
 
     with pytest.raises(ToolError, match="已注册"):
         left.merge(right)
+
+
+def test_registry_exclude_and_replace_preserve_stable_order() -> None:
+    full = create_default_registry()
+    reduced = full.exclude(("write_file", "run_command"))
+    assert reduced.names() == (
+        "read_file", "edit_file", "find_files", "search_code", "read_git_changes"
+    )
+    replacement = full.get("read_file")
+    assert full.replace(replacement).names() == full.names()

@@ -668,3 +668,28 @@ def test_context_overflow_releases_prompt_lease_when_provider_not_called(tmp_pat
     assert provider.calls == []
     assert [item.content for item in lease.instructions] == ["keep me"]
     hooks.release_prompt_lease(lease.lease_id)
+
+
+def test_team_registry_provider_is_request_scoped_and_session_reset_revokes_binding(tmp_path: Path) -> None:
+    from mycode.sessions import SessionJournal
+
+    journal = SessionJournal(tmp_path)
+    calls = []
+    cleared = []
+    agent = AgentRunner(
+        ScriptedProvider([[StreamEvent(type="message_done")]]),
+        create_default_registry(),
+        ToolContext(workspace_root=tmp_path),
+        session_journal=journal,
+        team_registry_provider=lambda base, session_id, mode: (
+            calls.append((session_id, mode)) or base.exclude(("write_file",))
+        ),
+        on_session_reset=cleared.append,
+    )
+    registry = agent._registry_for_request(AgentRequest("", mode="default"))
+    assert "write_file" not in registry.names()
+    old_session = journal.session_id
+    agent.new_session()
+    assert calls == [(old_session, "default")]
+    assert cleared == [old_session]
+    agent.close()

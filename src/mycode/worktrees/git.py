@@ -32,6 +32,8 @@ class GitRunner:
             {
                 "GIT_PAGER": "cat",
                 "GIT_TERMINAL_PROMPT": "0",
+                "GIT_CONFIG_NOSYSTEM": "1",
+                "GIT_EXTERNAL_DIFF": "",
                 "LC_ALL": "C",
             }
         )
@@ -66,6 +68,52 @@ class GitRunner:
         if not ref.startswith("refs/heads/"):
             raise WorktreeError("detached_head", "主工作区 HEAD 必须指向本地分支。")
         return filesystem_repository_id(workspace), head, ref
+
+    def head(self, workspace: Path) -> str:
+        return self._text(("rev-parse", "--verify", "HEAD^{commit}"), workspace)
+
+    def current_branch_ref(self, workspace: Path) -> str:
+        ref = self._text(("symbolic-ref", "-q", "HEAD"), workspace)
+        if not ref.startswith("refs/heads/"):
+            raise WorktreeError("detached_head", "Git HEAD 必须指向本地分支。")
+        return ref
+
+    def is_clean(self, workspace: Path) -> bool:
+        tracked, untracked = self.status(workspace)
+        return not tracked and not untracked
+
+    def create_branch(self, workspace: Path, branch_ref: str, base: str) -> None:
+        self.validate_branch_ref(workspace, branch_ref)
+        self.run(("branch", branch_ref.removeprefix("refs/heads/"), base), cwd=workspace)
+
+    def merge_no_ff(self, workspace: Path, commit: str, message: str) -> GitResult:
+        if "\n" in message or "\0" in message:
+            raise WorktreeError("invalid_commit_message", "Git 提交信息非法。")
+        return self.run(
+            ("-c", "commit.gpgSign=false", "-c", "core.hooksPath=/dev/null", "merge", "--no-ff", "--no-edit", "-m", message, commit),
+            cwd=workspace,
+            check=False,
+        )
+
+    def abort_merge(self, workspace: Path) -> None:
+        self.run(("merge", "--abort"), cwd=workspace, check=False)
+
+    def fast_forward(self, workspace: Path, target: str) -> None:
+        self.run(("merge", "--ff-only", target), cwd=workspace)
+
+    def update_ref(self, workspace: Path, ref: str, new: str, expected_old: str) -> None:
+        self.run(("update-ref", ref, new, expected_old), cwd=workspace)
+
+    def conflict_paths(self, workspace: Path) -> tuple[str, ...]:
+        raw = self.run(
+            ("diff", "--name-only", "--diff-filter=U", "-z"),
+            cwd=workspace,
+            optional_locks=True,
+        ).stdout
+        return tuple(item.decode("utf-8", errors="strict") for item in raw.split(b"\0") if item)
+
+    def diff_check(self, workspace: Path) -> GitResult:
+        return self.run(("diff", "--check"), cwd=workspace, optional_locks=True, check=False)
 
     def validate_branch_ref(self, workspace: Path, branch_ref: str) -> None:
         result = self.run(

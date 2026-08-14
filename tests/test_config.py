@@ -508,3 +508,52 @@ mcp_servers:
 
     with pytest.raises(ConfigError, match="Server 名"):
         load_project_config(path)
+
+
+def test_team_config_defaults_and_two_lock_config(tmp_path: Path) -> None:
+    path = write_config(
+        tmp_path,
+        """
+protocol: deepseek
+model: demo
+base_url: https://example.com
+api_key: key
+teams:
+  max_members: 12
+  verification_commands:
+    - id: unit
+      argv: [python, -m, pytest, -q]
+      timeout_seconds: 30
+  coordinator:
+    enabled: true
+""",
+    )
+    config = load_project_config(path)
+    assert config.teams.max_members == 12
+    assert config.teams.coordinator.enabled
+    assert config.teams.verification_commands[0].command_id == "unit"
+
+
+@pytest.mark.parametrize(
+    "fragment",
+    [
+        "unknown: true",
+        "max_members: 0",
+        "coordinator: {enabled: 1}",
+        "verification_commands: [{id: unit, argv: ['pytest; rm']}]",
+    ],
+)
+def test_rejects_unsafe_team_config(tmp_path: Path, fragment: str) -> None:
+    path = write_config(
+        tmp_path,
+        f"""
+protocol: deepseek
+model: demo
+base_url: https://example.com
+api_key: key
+teams:
+  {fragment}
+""",
+    )
+    with pytest.raises(ConfigError):
+        load_project_config(path)

@@ -395,6 +395,49 @@ command、URL 和 headers 不做事件模板替换，动态数据只能从 JSON 
 
 Payload 始终包含 `schema_version`、带时区时间、工作区和会话信息；活动轮次及事件专属的消息、工具、结果、压缩或错误字段按需出现。各条件和动作观察同一份只读 Payload。
 
+## 长期团队协作
+
+主会话可以显式创建或恢复一个长期小组，并在后续请求中以 Team Lead 身份使用团队工具：
+
+```text
+/team create backend-upgrade
+/team status
+/team switch another-team
+/team resume backend-upgrade
+/team archive
+```
+
+一个会话同时只绑定一个活动小组，但用户目录可以保存多个小组。团队配置、共享任务、审批、邮箱、成员上下文和集成记录位于 `~/.mycode/teams/<team>/`；CLI 退出不会删除它们。成员自然完成后进入 `idle`，Lead 再次发信时会从持久化上下文和邮箱游标继续工作。归档会移动数据到 `~/.mycode/teams-archive/`，若存在运行成员、脏工作树、未集成提交或待审批计划则拒绝执行。
+
+可写成员始终拥有长期独立 Git worktree 和团队分支；只读成员可以共享只读工作区。`backend: auto` 优先使用 tmux 独立 pane，环境不满足时会把原因写入成员诊断并明确降级到同进程 coroutine。显式选择 tmux 时不会静默降级。tmux 是可选依赖，独立 worker 使用一次性 0600 启动票据，邮箱消息先落盘再通过已验证 pane PID 的 `SIGUSR1` 唤醒。
+
+绑定后 Lead 获得以下工具：
+
+- `TeamMember`：创建、启动、停止和升级长期成员角色快照。
+- `SharedTask`：管理带完成依赖的共享任务 DAG，以及批准或驳回成员计划。
+- `Mailbox`：点对点发送、广播、查询和确认消息。
+- `TeamIntegrate`：预检并在临时 integration worktree/branch 中原子合并成果。
+
+成员只获得固定的 `SharedTask` 和 `Mailbox` 协作工具，以及角色和现有权限共同允许的普通工具。普通未绑定主会话和一次性子 Agent 看不到团队工具。需要审批的成员必须通过 `SharedTask submit_plan` 提交计划；Lead 使用 `approve_plan` 或 `reject_plan`，决定绑定成员、任务、计划版本和 fingerprint。批准只解除这层团队门禁，不扩大项目权限或临时审批。
+
+集成会冻结 Lead HEAD、任务 revision、成员分支和提交集合，在临时工作树中按依赖拓扑合并，执行内置 `git diff --check` 和 `teams.verification_commands`。只有全部成功才以 fast-forward 推进 Lead。冲突或验证失败会保留诊断并保持 Lead 分支、索引和工作区不变。
+
+Coordinator 模式需要两把锁同时打开：
+
+```yaml
+teams:
+  coordinator:
+    enabled: true
+```
+
+```bash
+MEWCODE_COORDINATOR=1 mycode
+```
+
+启用后 Lead 不再拥有 `write_file`、`edit_file` 和普通 `run_command`，只能读取、派人、终止、发消息、引用配置中的验证命令，以及执行绑定活动 integration ID 的固定 Git 状态机操作。需要修改文件的冲突必须委派给成员处理。
+
+本阶段不支持跨机器团队、成员间实时流式通信或除“同组任务完成依赖”以外的复杂调度约束。
+
 ## Agent Loop
 
 Agent Loop 使用 ReAct 风格循环工作：每一轮请求模型、流式收集文本和工具调用、执行工具、把工具结果回写进对话历史，再进入下一轮判断。循环会在以下情况停止：

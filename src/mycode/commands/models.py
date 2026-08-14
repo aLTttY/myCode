@@ -124,3 +124,13 @@ class AgentTaskSummary:
     worktree_base_commit: str = ""
     worktree_status: str = ""
     worktree_reason: str = ""
+
+
+@dataclass(frozen=True)
+class TeamStatus:
+    name: str
+    status: str
+    revision: int
+    member_count: int
+    task_count: int
+    coordinator_enabled: bool

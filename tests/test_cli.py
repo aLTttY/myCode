@@ -972,3 +972,8 @@ def test_render_keyboard_interrupt_closes_event_iterator() -> None:
 
     assert cancellation.is_cancelled()
     assert closed == [True]
+
+
+def test_team_worker_subcommand_is_dispatched_before_normal_cli(monkeypatch) -> None:
+    monkeypatch.setattr(cli, "worker_main", lambda argv: 7 if list(argv) == ["--team", "alpha"] else 9)
+    assert cli.main(["team-worker", "--team", "alpha"]) == 7

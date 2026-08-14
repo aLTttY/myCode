@@ -56,6 +56,32 @@ agents:
         source: .git/hooks
         required: false
 
+# 长期团队协作。团队元数据固定持久化到 ~/.mycode/teams/<team>/，不写入仓库。
+# 后端 auto 优先 tmux；tmux 不可用时会明确报告原因并降级到 coroutine。
+teams:
+  max_members: 8
+  max_tasks: 1000
+  max_dependencies_per_task: 32
+  max_message_chars: 20000
+  message_summary_chars: 240
+  mailbox_batch_size: 50
+  max_mailbox_bytes: 52428800
+  max_context_bytes: 104857600
+  max_work_log_entries: 1000
+  lock_timeout_seconds: 5
+  shutdown_timeout_seconds: 5
+  backend_start_timeout_seconds: 10
+  integration_timeout_seconds: 300
+  # 模型只能引用命令 ID，不能修改 argv。命令始终通过 shell=false 执行。
+  verification_commands:
+    - id: unit-tests
+      argv: [.venv/bin/python, -m, pytest, -q]
+      timeout_seconds: 300
+  # Coordinator 默认关闭。这里开启只是第一把锁；启动进程时还必须显式设置
+  # MEWCODE_COORDINATOR=1，两个条件同时满足才会收缩 Lead 工具面。
+  coordinator:
+    enabled: false
+
 # Agent 角色位于项目 .mycode/agents/ 或用户 ~/.mycode/agents/；内置角色与
 # 由宿主注入的插件目录优先级更低。后台 allowlist 只能收紧执行面，不能放开
 # Agent、Task、load_skill 等全局禁止项，也不能跳过角色、Plan 或权限规则。

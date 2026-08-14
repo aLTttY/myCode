@@ -10,7 +10,7 @@ from prompt_toolkit.shortcuts import clear
 from prompt_toolkit.shortcuts.prompt import CompleteStyle
 
 from .agent.cancellation import CancellationToken
-from .agent.config import AgentRequest
+from .agent.config import AgentConfig, AgentRequest
 from .agent.runner import AgentRunner
 from .agents.bridge import ParentRequestBridge
 from .agents.catalog import AgentCatalog
@@ -38,7 +38,7 @@ from .commands import (
     create_slash_command_key_bindings,
 )
 from .config import load_config
-from .instructions import InstructionLoader
+from .instructions import InstructionBundle, InstructionLoader
 from .hooks.actions import HookActionExecutor
 from .hooks.config import HookConfigLoader
 from .hooks.events import HookEventFactory
@@ -57,7 +57,7 @@ from .skills.commands import commands_from_snapshot
 from .skills.isolated import IsolatedSkillRunner
 from .skills.models import SkillCatalogError
 from .skills.runtime import SkillRuntime
-from .tool_safety import SYSTEM_TOOLS
+from .tool_safety import READ_TOOLS, SYSTEM_TOOLS
 from .tools.registry import create_default_registry
 from .context.models import CompactionReport
 from .types import ConfigError, ProviderError, TokenUsage, ToolContext, ToolError
@@ -68,6 +68,11 @@ from .worktrees import (
     WorktreeManager,
 )
 from .agents.worktree_executor import WorktreeTaskExecutor
+from .teams.commands import team_command
+from .teams.member import MemberAgentResult, MemberRunRequest
+from .teams.models import AgentRoleSnapshot
+from .teams.runtime import TeamRuntime
+from .teams.worker import worker_main
 
 
 # 未指定 --config 时使用的默认配置文件
@@ -85,6 +90,9 @@ def read_user_input(prompt_text: str) -> str:
 
 
 def main(argv: Sequence[str] | None = None) -> int:
+    actual_argv = list(sys.argv[1:] if argv is None else argv)
+    if actual_argv and actual_argv[0] == "team-worker":
+        return worker_main(actual_argv[1:])
     # 解析命令行参数，例如：mycode --config custom.yaml
     parser = argparse.ArgumentParser(
         prog="mycode",
@@ -106,10 +114,13 @@ def main(argv: Sequence[str] | None = None) -> int:
         action="store_true",
         help="跳过自动恢复并创建新会话",
     )
-    args = parser.parse_args(argv)
+    args = parser.parse_args(actual_argv)
+
+    team_holder: dict[str, TeamRuntime] = {}
 
     try:
         command_registry = create_default_command_registry()
+        command_registry.register(team_command(lambda: team_holder["runtime"]))
     except CommandRegistrationError as exc:
         print(f"命令注册错误：{exc}", file=sys.stderr)
         return 1
@@ -136,6 +147,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     hook_runtime: HookRuntime | None = None
     task_manager: AgentTaskManager | None = None
     worktree_janitor: WorktreeJanitor | None = None
+    team_runtime: TeamRuntime | None = None
     try:
         try:
             remote_tools, discovery_warnings = mcp_manager.discover()
@@ -303,6 +315,25 @@ def main(argv: Sequence[str] | None = None) -> int:
         )
         role_runtime.publish(role_snapshot)
         _print_agent_diagnostics(role_snapshot.diagnostics)
+        def resolve_team_role(name: str) -> AgentRoleSnapshot:
+            role = role_runtime.definition(name)
+            return AgentRoleSnapshot(
+                role.name, role.description, role.allowed_tools, role.denied_tools,
+                role.model, role.max_iterations, role.permission_mode,
+                role.system_prompt, role.source, role.source_id, role.fingerprint,
+                role.isolation,
+            )
+        team_runtime = TeamRuntime(config, workspace_root, resolve_team_role)
+        team_holder["runtime"] = team_runtime
+        team_runtime.member_runtime.agent_factory = lambda identity: _CLIMemberAgent(
+            identity,
+            team_runtime,
+            tool_registry,
+            provider_pool,
+            permission_service,
+            config,
+            instruction_bundle,
+        )
         isolated_skill_runner = IsolatedSkillRunner(
             app_config=config,
             base_registry=tool_registry,
@@ -335,6 +366,9 @@ def main(argv: Sequence[str] | None = None) -> int:
             request_bridge=request_bridge,
             task_manager=task_manager,
             task_shutdown_timeout_seconds=config.agents.shutdown_timeout_seconds,
+            team_registry_provider=team_runtime.registry_for,
+            on_session_reset=team_runtime.clear_session,
+            team_instruction_reserver=team_runtime.reserve_lead_instructions,
         )
         agent_holder["agent"] = agent
         exit_reason = "fatal_error"
@@ -364,6 +398,8 @@ def main(argv: Sequence[str] | None = None) -> int:
                 hook_runtime.end_session(exit_reason)
             if worktree_janitor is not None:
                 worktree_janitor.close(config.agents.shutdown_timeout_seconds)
+            if team_runtime is not None:
+                team_runtime.close()
             if task_manager is not None:
                 report = task_manager.shutdown(config.agents.shutdown_timeout_seconds)
                 if report.unfinished:
@@ -390,6 +426,8 @@ def main(argv: Sequence[str] | None = None) -> int:
     finally:
         if worktree_janitor is not None:
             worktree_janitor.close(config.agents.shutdown_timeout_seconds)
+        if team_runtime is not None:
+            team_runtime.close()
         if hook_runtime is not None:
             hook_runtime.close()
         mcp_manager.close()
@@ -410,6 +448,79 @@ def _create_pooled_provider(config, *, client):
     except TypeError:
         # 保留测试和第三方单参数 Provider factory 的兼容路径。
         return create_provider(config)
+
+
+class _CLIMemberAgent:
+    def __init__(
+        self,
+        identity,
+        runtime: TeamRuntime,
+        base_registry,
+        provider_pool,
+        permission_service,
+        config,
+        instruction_bundle: InstructionBundle,
+    ) -> None:
+        self.identity = identity
+        self.runtime = runtime
+        self.base_registry = base_registry
+        self.provider_pool = provider_pool
+        self.permission_service = permission_service
+        self.config = config
+        self.instruction_bundle = instruction_bundle
+
+    def run(self, request: MemberRunRequest) -> MemberAgentResult:
+        member = self.runtime.store.load(self.identity.team_name).team.members[self.identity.member_id]
+        role = member.role
+        allowed = set(role.allowed_tools or self.base_registry.names())
+        allowed.difference_update(role.denied_tools)
+        allowed.difference_update({"Agent", "Task", "load_skill"})
+        if not member.writable or (request.approval_required and not request.approval_effective):
+            allowed.intersection_update(READ_TOOLS)
+        registry = self.runtime.tools.for_member(
+            self.base_registry, self.identity, tuple(name for name in self.base_registry.names() if name in allowed)
+        )
+        model = self.config.model if role.model == "inherit" else self.config.agents.model_aliases[role.model]
+        role_instructions = InstructionBundle(
+            content=(role.system_prompt + "\n\n" + self.instruction_bundle.content).strip(),
+            loaded_files=self.instruction_bundle.loaded_files,
+            warnings=self.instruction_bundle.warnings,
+        )
+        runner = AgentRunner(
+            self.provider_pool.get(model),
+            full_registry=registry,
+            tool_context=ToolContext(
+                workspace_root=request.workspace,
+                excluded_roots=(request.workspace / ".mycode" / "worktrees",),
+            ),
+            config=AgentConfig(max_iterations=role.max_iterations),
+            permission_service=self.permission_service,
+            context_config=self.config.context,
+            instruction_bundle=role_instructions,
+            restored_messages=request.context,
+        )
+        inbox_text = "\n\n".join(message.content for message in request.inbox_messages)
+        task_text = ""
+        if request.task_id:
+            task_text = (
+                f"当前共享任务：{request.task_id}\n标题：{request.task_title}\n"
+                f"说明：{request.task_description}\n"
+            )
+        approval_text = ""
+        if request.approval_required and not request.approval_effective:
+            approval_text = "当前计划尚未获批；只能读取、更新共享任务/邮箱并提交审批计划，不得修改代码。\n"
+        text = (task_text + approval_text + inbox_text).strip() or "检查当前共享任务和邮箱，然后报告状态。"
+        try:
+            for _event in runner.run(AgentRequest(text=text, mode="default")):
+                pass
+            new_messages = tuple(runner.messages[len(request.context):])
+            summary = next(
+                (message.content for message in reversed(new_messages) if message.role == "assistant"),
+                "",
+            )
+            return MemberAgentResult(new_messages, summary)
+        finally:
+            runner.close()
 
 
 def _print_agent_notification(item) -> None:

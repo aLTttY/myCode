@@ -117,6 +117,9 @@ class AgentRunner:
         request_bridge: ParentRequestBridge | None = None,
         task_manager: AgentTaskManager | None = None,
         task_shutdown_timeout_seconds: float = 5.0,
+        team_registry_provider: Callable[[ToolRegistry, str, str], ToolRegistry] | None = None,
+        on_session_reset: Callable[[str], None] | None = None,
+        team_instruction_reserver: Callable[[str], tuple[Sequence[DynamicInstruction], Callable[[], None], Callable[[], None]] | None] | None = None,
     ) -> None:
         self.provider = provider
         self.full_registry = full_registry
@@ -149,6 +152,9 @@ class AgentRunner:
         self.request_bridge = request_bridge
         self.task_manager = task_manager
         self.task_shutdown_timeout_seconds = task_shutdown_timeout_seconds
+        self.team_registry_provider = team_registry_provider
+        self.on_session_reset = on_session_reset
+        self.team_instruction_reserver = team_instruction_reserver
         if self.skill_runtime is not None and not self.full_registry.contains("load_skill"):
             self.full_registry.register(LoadSkillTool(self._load_skill_from_agent))
 
@@ -391,10 +397,18 @@ class AgentRunner:
 
     def _registry_for_request(self, request: AgentRequest) -> ToolRegistry:
         if self.skill_runtime is not None:
-            return self.skill_runtime.project_registry(self.full_registry, request.mode)
-        if request.mode == "plan":
-            return create_readonly_registry(self.full_registry)
-        return self.full_registry
+            registry = self.skill_runtime.project_registry(self.full_registry, request.mode)
+        elif request.mode == "plan":
+            registry = create_readonly_registry(self.full_registry)
+        else:
+            registry = self.full_registry
+        if self.team_registry_provider is not None and self.session_journal is not None:
+            registry = self.team_registry_provider(
+                registry,
+                self.session_journal.session_id,
+                "plan" if request.mode == "plan" else "default",
+            )
+        return registry
 
     def invoke_skill(
         self,
@@ -500,6 +514,7 @@ class AgentRunner:
 
     def new_session(self) -> tuple[str, tuple[str, ...]]:
         warnings: list[str] = []
+        old_session_id = self.session_journal.session_id if self.session_journal is not None else ""
         if self.task_manager is not None and self.session_journal is not None:
             old_session_id = self.session_journal.session_id
             self.task_manager.cancel_session(old_session_id, clear_inbox=True)
@@ -527,6 +542,8 @@ class AgentRunner:
             self.skill_runtime.reset()
         self._last_request = None
         self._time_gap_reminder = ""
+        if old_session_id and self.on_session_reset is not None:
+            self.on_session_reset(old_session_id)
         return self.session_journal.session_id, tuple(warnings)
 
     def take_memory_notices(self):
@@ -535,6 +552,25 @@ class AgentRunner:
         return self.memory_worker.take_notices()
 
     def _reserve_request_instructions(self) -> _RequestInstructionLease:
+        base = self._reserve_base_request_instructions()
+        if self.team_instruction_reserver is None or self.session_journal is None:
+            return base
+        try:
+            team_lease = self.team_instruction_reserver(self.session_journal.session_id)
+        except Exception:
+            team_lease = None
+        if team_lease is None:
+            return base
+        instructions, team_commit, team_release = team_lease
+        team_instructions = tuple(instructions)
+        return _RequestInstructionLease(
+            (*base.instructions, *team_instructions),
+            refresh=lambda: (*base.refresh(), *team_instructions),
+            commit=lambda: (base.commit(), team_commit()),
+            release=lambda: (base.release(), team_release()),
+        )
+
+    def _reserve_base_request_instructions(self) -> _RequestInstructionLease:
         if self.hook_runtime is not None:
             try:
                 lease = self.hook_runtime.reserve_prompts()

@@ -12,6 +12,7 @@ from .models import (
     SessionStatus,
     TokenStatus,
     AgentTaskSummary,
+    TeamStatus,
 )
 
 
@@ -75,4 +76,11 @@ class CommandUI(Protocol):
         ...
 
     def refresh_status(self) -> None:
+        ...
+
+
+class TeamCommandUI(Protocol):
+    """Optional richer renderer for hosts that do not use plain command messages."""
+
+    def display_team_status(self, status: TeamStatus) -> None:
         ...
